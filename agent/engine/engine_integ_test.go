@@ -139,6 +139,10 @@ func dialWithRetries(proto string, address string, tries int, timeout time.Durat
 	return conn, err
 }
 
+func TestBroken(t *testing.T) {
+	t.Fatal("This test is expected to fail")
+}
+
 // TestStartStopUnpulledImage ensures that an unpulled image is successfully
 // pulled, run, and stopped via docker.
 func TestStartStopUnpulledImage(t *testing.T) {
