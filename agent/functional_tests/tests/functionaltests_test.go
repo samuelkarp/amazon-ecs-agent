@@ -28,7 +28,16 @@ import (
 
 	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
 	. "github.com/aws/amazon-ecs-agent/agent/functional_tests/util"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/cloudwatch"
 	docker "github.com/fsouza/go-dockerclient"
+	"github.com/pborman/uuid"
+)
+
+const (
+	waitTaskStateChangeDuration     = 2 * time.Minute
+	waitMetricsInCloudwatchDuration = 4 * time.Minute
 )
 
 // TestRunManyTasks runs several tasks in short succession and expects them to
@@ -537,5 +546,102 @@ func TestTaskCleanup(t *testing.T) {
 	_, err = agent.DockerClient.InspectContainer(dockerId)
 	if err == nil {
 		t.Fatalf("Expected error inspecting container in task")
+	}
+}
+
+// TestTelemetry tests whether agent can send metrics to TACS
+func TestTelemetry(t *testing.T) {
+	// Try to use a new cluster for this test, ensure no other task metrics for this cluster
+	newClusterName := "ecstest-telemetry-" + uuid.New()
+	_, err := ECS.CreateCluster(&ecs.CreateClusterInput{
+		ClusterName: aws.String(newClusterName),
+	})
+	if err != nil {
+		t.Fatalf("Failed to create cluster %s : %v", newClusterName, err)
+	}
+	defer DeleteCluster(t, newClusterName)
+
+	agentOptions := AgentOptions{
+		ExtraEnvironment: map[string]string{
+			"ECS_CLUSTER": newClusterName,
+		},
+	}
+	agent := RunAgent(t, &agentOptions)
+	defer agent.Cleanup()
+
+	params := &cloudwatch.GetMetricStatisticsInput{
+		MetricName: aws.String("CPUUtilization"),
+		Namespace:  aws.String("AWS/ECS"),
+		Period:     aws.Int64(60),
+		Statistics: []*string{
+			aws.String("Average"),
+			aws.String("SampleCount"),
+		},
+		Dimensions: []*cloudwatch.Dimension{
+			{
+				Name:  aws.String("ClusterName"),
+				Value: aws.String(newClusterName),
+			},
+		},
+	}
+	params.StartTime = aws.Time(RoundTimeUp(time.Now(), time.Minute).UTC())
+	params.EndTime = aws.Time((*params.StartTime).Add(waitMetricsInCloudwatchDuration).UTC())
+	// wait for the agent start and ensure no task is running
+	time.Sleep(waitMetricsInCloudwatchDuration)
+
+	cwclient := cloudwatch.New(session.New(), aws.NewConfig().WithRegion(*ECS.Config.Region))
+	if err = VerifyMetrics(cwclient, params, true); err != nil {
+		t.Errorf("Before task running, verify metrics for CPU utilization failed: %v", err)
+	}
+
+	params.MetricName = aws.String("MemoryUtilization")
+	if err = VerifyMetrics(cwclient, params, true); err != nil {
+		t.Errorf("Before task running, verify metrics for memory utilization failed: %v", err)
+	}
+
+	testTask, err := agent.StartTask(t, "telemetry")
+	if err != nil {
+		t.Fatalf("Expected to start telemetry task: %v", err)
+	}
+	// Wait for the task to run and the agent to send back metrics
+	err = testTask.WaitRunning(waitTaskStateChangeDuration)
+	if err != nil {
+		t.Fatalf("Error start telemetry task: %v", err)
+	}
+
+	time.Sleep(waitMetricsInCloudwatchDuration)
+	params.EndTime = aws.Time(RoundTimeUp(time.Now(), time.Minute).UTC())
+	params.StartTime = aws.Time((*params.EndTime).Add(-waitMetricsInCloudwatchDuration).UTC())
+	params.MetricName = aws.String("CPUUtilization")
+	if err = VerifyMetrics(cwclient, params, false); err != nil {
+		t.Errorf("Task is running, verify metrics for CPU utilization failed: %v", err)
+	}
+
+	params.MetricName = aws.String("MemoryUtilization")
+	if err = VerifyMetrics(cwclient, params, false); err != nil {
+		t.Errorf("Task is running, verify metrics for memory utilization failed: %v", err)
+	}
+
+	err = testTask.Stop()
+	if err != nil {
+		t.Fatalf("Failed to stop the telemetry task: %v", err)
+	}
+
+	err = testTask.WaitStopped(waitTaskStateChangeDuration)
+	if err != nil {
+		t.Fatalf("Waiting for task stop error: %v", err)
+	}
+
+	time.Sleep(waitMetricsInCloudwatchDuration)
+	params.EndTime = aws.Time(RoundTimeUp(time.Now(), time.Minute).UTC())
+	params.StartTime = aws.Time((*params.EndTime).Add(-waitMetricsInCloudwatchDuration).UTC())
+	params.MetricName = aws.String("CPUUtilization")
+	if err = VerifyMetrics(cwclient, params, true); err != nil {
+		t.Errorf("Task stopped: verify metrics for CPU utilization failed:  %v", err)
+	}
+
+	params.MetricName = aws.String("MemoryUtilization")
+	if err = VerifyMetrics(cwclient, params, true); err != nil {
+		t.Errorf("Task stopped, verify metrics for memory utilization failed: %v", err)
 	}
 }
