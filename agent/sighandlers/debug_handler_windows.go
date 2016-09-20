@@ -1,4 +1,4 @@
-// +build !windows
+// +build windows
 
 // Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
@@ -15,27 +15,5 @@
 
 package sighandlers
 
-import (
-	"os"
-	"os/signal"
-	"runtime"
-	"syscall"
-	"time"
-
-	"github.com/cihub/seelog"
-)
-
 func StartDebugHandler() {
-	signalChannel := make(chan os.Signal, 1)
-	signal.Notify(signalChannel, syscall.SIGUSR1)
-	go func() {
-		for range signalChannel {
-			// "640 k ought to be enough for anybody." - Bill Gates, 1981
-			stackDump := make([]byte, 640*1024)
-			n := runtime.Stack(stackDump, true)
-			// Resize the buffer to the size of the actual stack
-			stackDump = stackDump[:n]
-			seelog.Criticalf("====== STACKTRACE ======\n%v\n%s\n====== /STACKTRACE ======", time.Now(), stackDump)
-		}
-	}()
 }
