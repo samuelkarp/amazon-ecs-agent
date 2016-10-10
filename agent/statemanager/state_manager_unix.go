@@ -38,6 +38,10 @@ On each load, the agent opens a well-known file name for the state file and
 reads it.
 */
 
+func newPlatformDependencies() platformDependencies {
+	return nil
+}
+
 func (manager *basicStateManager) readFile() ([]byte, error) {
 	// Note that even if Save overwrites the file we're looking at here, we
 	// still hold the old inode and should read the old data so no locking is
