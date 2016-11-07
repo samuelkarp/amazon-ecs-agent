@@ -15,7 +15,6 @@
 package engine
 
 import (
-	"context"
 	"errors"
 	"io/ioutil"
 	"os"
@@ -24,6 +23,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/context"
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	"github.com/aws/amazon-ecs-agent/agent/config"
