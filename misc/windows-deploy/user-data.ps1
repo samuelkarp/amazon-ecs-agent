@@ -1,5 +1,5 @@
 <powershell>
-## The string 'windows' shoud be replaced with 
+## The string 'windows' shoud be replaced with
 ## template variable for cluster name.
 
 # Set agent env variables for the Machine context (durrable)
@@ -10,7 +10,7 @@ $agentZipHash = '7748b1d3c73d5211e150db746cdec5bf'
 $agentZipUri = "https://s3-us-west-2.amazonaws.com/windows-agent/ecs-agent-windows-$agentVersion.zip"
 
 
-### --- Nothing user configureable after this point --- 
+### --- Nothing user configureable after this point ---
 $ecsExeDir = "$env:ProgramFiles\Amazon\ECS"
 $zipFile = "$env:TEMP\ecs-agent.zip"
 
@@ -40,7 +40,9 @@ $repeat = (New-TimeSpan -Minutes 1)
 try {
     Unregister-ScheduledJob -Name $jobname | out-null
 }
-catch { #noop }
+catch {
+  #noop 
+}
 
 $scriptblock = [scriptblock]::Create("$script")
 $trigger = New-JobTrigger -At (Get-Date).Date -RepeatIndefinitely -RepetitionInterval $repeat -Once
