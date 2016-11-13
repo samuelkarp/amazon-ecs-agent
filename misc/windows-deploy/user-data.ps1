@@ -6,7 +6,7 @@
 [Environment]::SetEnvironmentVariable("ECS_CLUSTER", "windows", "Machine")
 [Environment]::SetEnvironmentVariable("ECS_ENABLE_TASK_IAM_ROLE", "false", "Machine")
 $agentVersion = '1.14.0-1.windows.1'
-$agentZipUri = "https://s3.amazonaws.com/amazon-ecs-agent/ecs-agent-windows-${agentVersion}.zip"
+$agentZipUri = "https://s3.amazonaws.com/amazon-ecs-agent/ecs-agent-windows-$agentVersion.zip"
 
 ### --- Nothing user configureable after this point ---
 $ecsExeDir = "$env:ProgramFiles\Amazon\ECS"
