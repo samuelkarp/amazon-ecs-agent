@@ -6,9 +6,7 @@
 [Environment]::SetEnvironmentVariable("ECS_CLUSTER", "windows", "Machine")
 [Environment]::SetEnvironmentVariable("ECS_ENABLE_TASK_IAM_ROLE", "false", "Machine")
 $agentVersion = '1.14.0-1.windows.1'
-$agentZipHash = '7748b1d3c73d5211e150db746cdec5bf'
-$agentZipUri = "https://s3-us-west-2.amazonaws.com/windows-agent/ecs-agent-windows-$agentVersion.zip"
-
+$agentZipUri = "https://s3.amazonaws.com/amazon-ecs-agent/ecs-agent-windows-${agentVersion}.zip"
 
 ### --- Nothing user configureable after this point ---
 $ecsExeDir = "$env:ProgramFiles\Amazon\ECS"
@@ -16,6 +14,7 @@ $zipFile = "$env:TEMP\ecs-agent.zip"
 
 ### Get the files from S3
 Invoke-RestMethod -OutFile $zipFile -Uri $agentZipUri
+$agentZipHash = ((Invoke-RestMethod -Uri "$agentZipUri.md5").Split(" "))[0]
 
 ## MD5 Checksum
 $md5 = New-Object -TypeName System.Security.Cryptography.MD5CryptoServiceProvider
@@ -41,7 +40,7 @@ try {
     Unregister-ScheduledJob -Name $jobname | out-null
 }
 catch {
-  #noop 
+  #noop
 }
 
 $scriptblock = [scriptblock]::Create("$script")
