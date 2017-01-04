@@ -15,8 +15,14 @@ package simpletest
 
 import (
 	"testing"
+
+	. "github.com/aws/amazon-ecs-agent/agent/functional_tests/util"
 )
 
 // go test seems to require at least one non-tagged test to exist even when
 // running with a build tag
-func TestTest(t *testing.T) {}
+func TestTest(t *testing.T) {
+	agent := RunAgent(t, nil)
+	defer agent.Cleanup()
+	t.Fatal("DUMMY TEST")
+}
