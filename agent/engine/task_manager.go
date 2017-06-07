@@ -335,18 +335,18 @@ func (mtask *managedTask) steadyState() bool {
 // channel, it will return the value written to the channel, otherwise it will
 // return false
 func (mtask *managedTask) waitEvent(stopWaiting <-chan bool) bool {
-	log.Debug("Waiting for event for task", "task", mtask.Task)
+	seelog.Tracef("Waiting for event for task: %s", mtask.Task)
 	select {
 	case acsTransition := <-mtask.acsMessages:
-		log.Debug("Got acs event for task", "task", mtask.Task)
+		seelog.Tracef("Got acs event for task: %s", mtask.Task)
 		mtask.handleDesiredStatusChange(acsTransition.desiredStatus, acsTransition.seqnum)
 		return false
 	case dockerChange := <-mtask.dockerMessages:
-		log.Debug("Got container event for task", "task", mtask.Task)
+		seelog.Debugf("Got container event for task: %s", mtask.Task)
 		mtask.handleContainerChange(dockerChange)
 		return false
 	case b := <-stopWaiting:
-		log.Debug("No longer waiting", "task", mtask.Task)
+		seelog.Tracef("No longer waiting for task: %s", mtask.Task)
 		return b
 	}
 }
