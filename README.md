@@ -1,5 +1,34 @@
 # Amazon ECS Container Agent
 
+> # containerd prototype
+>
+> ## IMPORTANT!
+> This branch is a work-in-progress prototype and not suitable for anything
+> beyond experimental usage.  Lots of functionality is broken or missing.
+>
+> ## Status
+>
+> There's lots of work to do!  Not all of this will necessarily be completed
+> for the prototype, but all of it is important for using containerd.
+>
+> * [x] skeleton code for containerd client
+> * [ ] image pull
+> * [ ] image pull from private registries (including ECR)
+> * [ ] image lifecycle management (usage accounting + deletion)
+> * [ ] container launch
+> * [ ] container lifecycle management (monitoring, exit code reporting,
+>   removal)
+> * [ ] container telemetry
+> * [ ] container log collection
+> * [ ] host networking
+> * [ ] bridge networking (+ port mapping, links, dns, etc)
+> * [ ] volume mounts
+> * [ ] volume lifecycle management (usage accounting + deletion)
+> * [ ] unit tests
+> * [ ] integration tests
+> * [ ] functional tests
+> * [ ] more things I forgot to enumerate?
+
 [![Build Status](https://travis-ci.org/aws/amazon-ecs-agent.svg?branch=master)](https://travis-ci.org/aws/amazon-ecs-agent)
 [![Build status](https://ci.appveyor.com/api/projects/status/upkhbwf2oc0srglt?svg=true)](https://ci.appveyor.com/project/AmazonECS/amazon-ecs-agent)
 

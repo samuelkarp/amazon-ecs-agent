@@ -781,9 +781,9 @@ func (engine *DockerTaskEngine) Capabilities() []string {
 		capabilities = append(capabilities, capabilityPrefix+"apparmor")
 	}
 
-	if _, ok := versions[dockerclient.Version_1_19]; ok {
-		capabilities = append(capabilities, capabilityPrefix+"ecr-auth")
-	}
+	//if _, ok := versions[dockerclient.Version_1_19]; ok {
+	capabilities = append(capabilities, capabilityPrefix+"ecr-auth")
+	//}
 
 	if engine.cfg.TaskIAMRoleEnabled {
 		// The "task-iam-role" capability is supported for docker v1.7.x onwards
@@ -815,6 +815,7 @@ func (engine *DockerTaskEngine) Version() (string, error) {
 
 // isParallelPullCompatible checks the docker version and return true if docker version >= 1.11.1
 func (engine *DockerTaskEngine) isParallelPullCompatible() bool {
+	return true
 	version, err := engine.Version()
 	if err != nil {
 		seelog.Warnf("Failed to get docker version, err %v", err)

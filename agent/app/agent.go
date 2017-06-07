@@ -26,7 +26,6 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	"github.com/aws/amazon-ecs-agent/agent/ec2"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
-	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	"github.com/aws/amazon-ecs-agent/agent/eventhandler"
 	"github.com/aws/amazon-ecs-agent/agent/eventstream"
@@ -101,7 +100,8 @@ func newAgent(
 	}
 	log.Debugf("Loaded config: %s", cfg.String())
 
-	dockerClient, err := engine.NewDockerGoClient(dockerclient.NewFactory(cfg.DockerEndpoint), cfg)
+	//dockerClient, err := engine.NewDockerGoClient(dockerclient.NewFactory(cfg.DockerEndpoint), cfg)
+	dockerClient, err := engine.NewContainerdClient()
 	if err != nil {
 		// This is also non terminal in the current config
 		log.Criticalf("Error creating Docker client: %v", err)
