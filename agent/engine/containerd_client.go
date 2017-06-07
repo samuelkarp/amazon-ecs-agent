@@ -32,7 +32,7 @@ const (
 )
 
 func NewContainerdClient() (DockerClient, error) {
-	client, err := containerd.New("/tmp/containerd.sock")
+	client, err := containerd.New("/run/containerd/containerd.sock")
 	if err != nil {
 		return nil, err
 	}
@@ -85,32 +85,65 @@ func (c *containerdClient) CreateContainer(dockerConfig *docker.Config, dockerHo
 	image, err := c.client.GetImage(ctx, containerdImage) // TODO
 	if err != nil {
 		wrapped := errors.Wrapf(err, "containerd create: failed to resolve image %s", containerdImage)
-		return DockerContainerMetadata{Error: CannotPullContainerError{wrapped}}
+		return DockerContainerMetadata{Error: CannotCreateContainerError{wrapped}}
 	}
 	opts := []containerd.SpecOpts{
 		containerd.WithImageConfig(ctx, image),
 		// env
 		// mounts
-		containerd.WithProcessArgs("/bin/sleep", "60"),
+		containerd.WithProcessArgs("/bin/sh", "-c", "echo '**********hello'; sleep 60; echo '**********bye'"),
 	}
 	spec, err := containerd.GenerateSpec(opts...)
 	if err != nil {
 		wrapped := errors.Wrap(err, "containerd create: failed to generate spec")
-		return DockerContainerMetadata{Error: CannotPullContainerError{wrapped}}
+		return DockerContainerMetadata{Error: CannotCreateContainerError{wrapped}}
 	}
 	id := "ecs-test-container"
-	rootfs := containerd.WithNewRootFS(id, image)
-	container, err := c.client.NewContainer(ctx, id, containerd.WithSpec(spec), containerd.WithImage(image), rootfs)
+	container, err := c.client.NewContainer(ctx, id, containerd.WithSpec(spec), containerd.WithNewRootFS(id, image), containerd.WithImage(image))
 	if err != nil {
 		wrapped := errors.Wrap(err, "containerd create: failed to create container")
-		return DockerContainerMetadata{Error: CannotPullContainerError{wrapped}}
+		return DockerContainerMetadata{Error: CannotCreateContainerError{wrapped}}
 	}
 	seelog.Debugf("created container with id %s", container.ID())
 
 	return DockerContainerMetadata{DockerID: container.ID()}
 }
 func (c *containerdClient) StartContainer(string, time.Duration) DockerContainerMetadata {
-	return DockerContainerMetadata{Error: unimplemented}
+	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
+	id := "ecs-test-container"
+	container, err := c.client.LoadContainer(ctx, id)
+	if err != nil {
+		seelog.Error(err)
+		wrapped := errors.Wrapf(err, "containerd start: failed to get container with id %s", id)
+		return DockerContainerMetadata{Error: CannotStartContainerError{wrapped}}
+	}
+	task, err := container.NewTask(ctx, containerd.Stdio)
+	if err != nil {
+		seelog.Error(err)
+		wrapped := errors.Wrapf(err, "containerd start: failed to create task for container with id %s", id)
+		return DockerContainerMetadata{Error: CannotStartContainerError{wrapped}}
+	}
+	err = task.CloseStdin(ctx)
+	if err != nil {
+		seelog.Error(err)
+		return DockerContainerMetadata{Error: CannotStartContainerError{err}}
+	}
+	err = task.Start(ctx)
+	if err != nil {
+		seelog.Error(err)
+		wrapped := errors.Wrapf(err, "containerd start: failed to start task for container with id %s", id)
+		return DockerContainerMetadata{Error: CannotStartContainerError{wrapped}}
+	}
+	// TODO temporary...this needs to be handled elsewhere
+	go func() {
+		status, err := task.Wait(ctx)
+		if err != nil {
+			seelog.Errorf("Failed to wait for container %s to exit", id)
+		}
+		seelog.Infof("container %s exited with status %d", id, status)
+		task.Delete(ctx)
+	}()
+	return DockerContainerMetadata{DockerID: container.ID()}
 }
 func (c *containerdClient) StopContainer(string, time.Duration) DockerContainerMetadata {
 	return DockerContainerMetadata{Error: unimplemented}
