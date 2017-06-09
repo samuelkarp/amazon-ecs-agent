@@ -7,6 +7,8 @@ import (
 
 	"golang.org/x/net/context"
 
+	"syscall"
+
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
 	"github.com/cihub/seelog"
@@ -26,7 +28,8 @@ func (unimplementedError) ErrorName() string {
 var unimplemented = unimplementedError{errors.New("unimplemented")}
 
 const (
-	containerdImage = "docker.io/library/busybox:latest"
+	containerdImage = "docker.io/library/busybox:latest" // TODO remove
+	ecsContainerId  = "ecs-test-container"               // TODO remove
 
 	ecsNamespace = "ecs-test"
 )
@@ -91,14 +94,14 @@ func (c *containerdClient) CreateContainer(dockerConfig *docker.Config, dockerHo
 		containerd.WithImageConfig(ctx, image),
 		// env
 		// mounts
-		containerd.WithProcessArgs("/bin/sh", "-c", "echo '**********hello'; sleep 60; echo '**********bye'"),
+		containerd.WithProcessArgs("/bin/sh", "-c", "echo '**********hello'; sleep 600; echo '**********bye'"),
 	}
 	spec, err := containerd.GenerateSpec(opts...)
 	if err != nil {
 		wrapped := errors.Wrap(err, "containerd create: failed to generate spec")
 		return DockerContainerMetadata{Error: CannotCreateContainerError{wrapped}}
 	}
-	id := "ecs-test-container"
+	id := ecsContainerId
 	container, err := c.client.NewContainer(ctx, id, containerd.WithSpec(spec), containerd.WithNewRootFS(id, image), containerd.WithImage(image))
 	if err != nil {
 		wrapped := errors.Wrap(err, "containerd create: failed to create container")
@@ -110,7 +113,7 @@ func (c *containerdClient) CreateContainer(dockerConfig *docker.Config, dockerHo
 }
 func (c *containerdClient) StartContainer(string, time.Duration) DockerContainerMetadata {
 	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
-	id := "ecs-test-container"
+	id := ecsContainerId
 	container, err := c.client.LoadContainer(ctx, id)
 	if err != nil {
 		seelog.Error(err)
@@ -134,30 +137,98 @@ func (c *containerdClient) StartContainer(string, time.Duration) DockerContainer
 		wrapped := errors.Wrapf(err, "containerd start: failed to start task for container with id %s", id)
 		return DockerContainerMetadata{Error: CannotStartContainerError{wrapped}}
 	}
-	// TODO temporary...this needs to be handled elsewhere
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			seelog.Errorf("Failed to wait for container %s to exit", id)
-		}
-		seelog.Infof("container %s exited with status %d", id, status)
-		task.Delete(ctx)
-	}()
+
 	return DockerContainerMetadata{DockerID: container.ID()}
 }
 func (c *containerdClient) StopContainer(string, time.Duration) DockerContainerMetadata {
-	return DockerContainerMetadata{Error: unimplemented}
+	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
+	id := ecsContainerId
+	container, err := c.client.LoadContainer(ctx, id)
+	if err != nil {
+		seelog.Error(err)
+		wrapped := errors.Wrapf(err, "containerd stop: failed to get container with id %s", id)
+		return DockerContainerMetadata{Error: CannotStopContainerError{wrapped}}
+	}
+	task, err := container.Task(ctx, nil)
+	if err != nil {
+		seelog.Error(err)
+		wrapped := errors.Wrapf(err, "containerd stop: failed to get task for container with id %s", id)
+		return DockerContainerMetadata{Error: CannotStopContainerError{wrapped}}
+	}
+
+	err = task.Kill(ctx, syscall.SIGKILL)
+	if err != nil {
+		seelog.Error(err)
+		wrapped := errors.Wrapf(err, "containerd stop: failed to kill task for container with id %s", id)
+		return DockerContainerMetadata{Error: CannotStopContainerError{wrapped}}
+	}
+
+	status, err := task.Delete(ctx)
+	if err != nil {
+		seelog.Error(err)
+		wrapped := errors.Wrapf(err, "containerd stop: failed to delete task for container with id %s", id)
+		return DockerContainerMetadata{Error: CannotStopContainerError{wrapped}}
+	}
+	// TODO temporary
+	err = container.Delete(ctx)
+	if err != nil {
+		seelog.Error(err)
+		wrapped := errors.Wrapf(err, "containerd stop: failed to delete container with id %s", id)
+		return DockerContainerMetadata{Error: CannotStopContainerError{wrapped}}
+	}
+	exitCode := int(status)
+	return DockerContainerMetadata{DockerID: id, ExitCode: &exitCode}
 }
-func (c *containerdClient) DescribeContainer(string) (api.ContainerStatus, DockerContainerMetadata) {
-	return api.ContainerStatusNone, DockerContainerMetadata{Error: unimplemented}
+func (c *containerdClient) DescribeContainer(id string) (api.ContainerStatus, DockerContainerMetadata) {
+	dockerContainer, err := c.InspectContainer(id, inspectContainerTimeout)
+	if err != nil {
+		return api.ContainerStatusNone, DockerContainerMetadata{Error: CannotDescribeContainerError{err}}
+	}
+	return dockerStateToState(dockerContainer.State), metadataFromContainer(dockerContainer)
 }
+
+func (c *containerdClient) InspectContainer(string, time.Duration) (*docker.Container, error) {
+	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
+	id := ecsContainerId
+	container, err := c.client.LoadContainer(ctx, id)
+	if err != nil {
+		seelog.Error(err)
+		return nil, errors.Wrapf(err, "containerd inspect: failed to get container with id %s", id)
+
+	}
+	task, err := container.Task(ctx, nil)
+	if err != nil && err != containerd.ErrNoRunningTask {
+		seelog.Error(err)
+		return nil, errors.Wrapf(err, "containerd inspect: failed to get task for container with id %s", id)
+	}
+
+	state := docker.State{}
+	if err == containerd.ErrNoRunningTask {
+		state.Status = string(containerd.Stopped)
+		state.Running = false
+	} else {
+		s, _ := task.Status(ctx) // TODO
+		state.Status = string(s)
+		switch s {
+		case containerd.Running:
+			state.Running = true
+		case containerd.Stopped:
+			state.Running = false
+			// TODO get exit code
+		}
+	}
+
+	dockerContainer := &docker.Container{
+		ID:    container.ID(),
+		State: state,
+	}
+	return dockerContainer, unimplemented
+}
+
 func (c *containerdClient) RemoveContainer(string, time.Duration) error {
 	return unimplemented
 }
 
-func (c *containerdClient) InspectContainer(string, time.Duration) (*docker.Container, error) {
-	return nil, unimplemented
-}
 func (c *containerdClient) ListContainers(bool, time.Duration) ListContainersResponse {
 	return ListContainersResponse{Error: unimplemented}
 }
