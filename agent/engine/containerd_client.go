@@ -29,7 +29,6 @@ var unimplemented = unimplementedError{errors.New("unimplemented")}
 
 const (
 	containerdImage = "docker.io/library/busybox:latest" // TODO remove
-	ecsContainerId  = "ecs-test-container"               // TODO remove
 
 	ecsNamespace = "ecs-test"
 )
@@ -101,7 +100,7 @@ func (c *containerdClient) CreateContainer(dockerConfig *docker.Config, dockerHo
 		wrapped := errors.Wrap(err, "containerd create: failed to generate spec")
 		return DockerContainerMetadata{Error: CannotCreateContainerError{wrapped}}
 	}
-	id := ecsContainerId
+	id := name
 	container, err := c.client.NewContainer(ctx, id, containerd.WithSpec(spec), containerd.WithNewRootFS(id, image), containerd.WithImage(image))
 	if err != nil {
 		wrapped := errors.Wrap(err, "containerd create: failed to create container")
@@ -111,9 +110,9 @@ func (c *containerdClient) CreateContainer(dockerConfig *docker.Config, dockerHo
 
 	return DockerContainerMetadata{DockerID: container.ID()}
 }
-func (c *containerdClient) StartContainer(string, time.Duration) DockerContainerMetadata {
+func (c *containerdClient) StartContainer(name string, timeout time.Duration) DockerContainerMetadata {
 	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
-	id := ecsContainerId
+	id := name
 	container, err := c.client.LoadContainer(ctx, id)
 	if err != nil {
 		seelog.Error(err)
@@ -140,9 +139,9 @@ func (c *containerdClient) StartContainer(string, time.Duration) DockerContainer
 
 	return DockerContainerMetadata{DockerID: container.ID()}
 }
-func (c *containerdClient) StopContainer(string, time.Duration) DockerContainerMetadata {
+func (c *containerdClient) StopContainer(name string, timeout time.Duration) DockerContainerMetadata {
 	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
-	id := ecsContainerId
+	id := name
 	container, err := c.client.LoadContainer(ctx, id)
 	if err != nil {
 		seelog.Error(err)
@@ -169,13 +168,7 @@ func (c *containerdClient) StopContainer(string, time.Duration) DockerContainerM
 		wrapped := errors.Wrapf(err, "containerd stop: failed to delete task for container with id %s", id)
 		return DockerContainerMetadata{Error: CannotStopContainerError{wrapped}}
 	}
-	// TODO temporary
-	err = container.Delete(ctx)
-	if err != nil {
-		seelog.Error(err)
-		wrapped := errors.Wrapf(err, "containerd stop: failed to delete container with id %s", id)
-		return DockerContainerMetadata{Error: CannotStopContainerError{wrapped}}
-	}
+
 	exitCode := int(status)
 	return DockerContainerMetadata{DockerID: id, ExitCode: &exitCode}
 }
@@ -187,9 +180,8 @@ func (c *containerdClient) DescribeContainer(id string) (api.ContainerStatus, Do
 	return dockerStateToState(dockerContainer.State), metadataFromContainer(dockerContainer)
 }
 
-func (c *containerdClient) InspectContainer(string, time.Duration) (*docker.Container, error) {
+func (c *containerdClient) InspectContainer(id string, timeout time.Duration) (*docker.Container, error) {
 	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
-	id := ecsContainerId
 	container, err := c.client.LoadContainer(ctx, id)
 	if err != nil {
 		seelog.Error(err)
@@ -225,7 +217,20 @@ func (c *containerdClient) InspectContainer(string, time.Duration) (*docker.Cont
 	return dockerContainer, unimplemented
 }
 
-func (c *containerdClient) RemoveContainer(string, time.Duration) error {
+func (c *containerdClient) RemoveContainer(name string, timeout time.Duration) error {
+	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
+	id := name
+	container, err := c.client.LoadContainer(ctx, id)
+	if err != nil {
+		seelog.Error(err)
+		return errors.Wrapf(err, "containerd remove: failed to get container with id %s", id)
+	}
+
+	err = container.Delete(ctx)
+	if err != nil {
+		seelog.Error(err)
+		return errors.Wrapf(err, "containerd stop: failed to delete container with id %s", id)
+	}
 	return unimplemented
 }
 
