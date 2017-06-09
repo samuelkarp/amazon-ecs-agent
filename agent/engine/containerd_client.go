@@ -9,6 +9,8 @@ import (
 
 	"syscall"
 
+	"strings"
+
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
 	"github.com/cihub/seelog"
@@ -70,9 +72,9 @@ func (c *containerdClient) ContainerEvents(ctx context.Context) (<-chan DockerCo
 
 func (c *containerdClient) PullImage(image string, authData *api.RegistryAuthenticationData) DockerContainerMetadata {
 	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
-	image = containerdImage // TODO
-	seelog.Debugf("Pulling %s.  No progress will be shown.", image)
-	pullResponse, err := c.client.Pull(ctx, image, containerd.WithPullUnpack)
+	ref := imageToRef(image)
+	seelog.Debugf("Pulling %s.  No progress will be shown.", ref)
+	pullResponse, err := c.client.Pull(ctx, ref, containerd.WithPullUnpack)
 	if err != nil {
 		return DockerContainerMetadata{Error: CannotPullContainerError{err}}
 	}
@@ -80,6 +82,32 @@ func (c *containerdClient) PullImage(image string, authData *api.RegistryAuthent
 	// 2017-06-07T04:32:26Z [DEBUG] Pulled&{0xc4201d4520 {docker.io/library/redis:alpine {application/vnd.docker.distribution.manifest.v2+json sha256:03789f402b2ecfb98184bf128d180f398f81c63364948ff1454583b02442f73b 1568 [] map[] <nil>}}}
 
 	return DockerContainerMetadata{}
+}
+
+// imageToRef is a super simple set of rules to try and find a ref from a Docker-style image name
+func imageToRef(image string) string {
+	httpsPrefix := "https://"
+	if strings.HasPrefix(image, httpsPrefix) {
+		image = image[len(httpsPrefix):]
+	}
+
+	repo, tag := parseRepositoryTag(image)
+	if tag == "" {
+		image += ":" + dockerDefaultTag
+	}
+
+	if ok := strings.Contains(repo, "/"); !ok {
+		// no slash, looks like it's a library image
+		return "docker.io/library/" + image
+	}
+	parts := strings.SplitN(repo, "/", 2)
+	ok := strings.Contains(parts[0], ".")
+	if !ok {
+		// no . in part before /, looks like it's on Docker Hub
+		return "docker.io/" + image
+	}
+	// if the first part has a . and there is a /, looks like it's a fully-qualified ref?
+	return image
 }
 
 func (c *containerdClient) CreateContainer(dockerConfig *docker.Config, dockerHostConfig *docker.HostConfig, name string, timeout time.Duration) DockerContainerMetadata {
