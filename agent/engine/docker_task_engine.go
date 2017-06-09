@@ -22,6 +22,8 @@ import (
 
 	"golang.org/x/net/context"
 
+	"strings"
+
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
@@ -587,7 +589,16 @@ func (engine *DockerTaskEngine) createContainer(task *api.Task, container *api.C
 		name += string(c)
 	}
 
-	containerName := "ecs-" + task.Family + "-" + task.Version + "-" + name + "-" + utils.RandHex()
+	taskID := ""
+	taskSplit := strings.SplitN(task.Arn, "/", 2)
+	if len(taskSplit) == 2 {
+		taskID = taskSplit[1]
+	} else {
+		// TODO something better
+		taskID = utils.RandHex()
+	}
+
+	containerName := "ecs-" + task.Family + "-" + task.Version + "-" + name + "-" + taskID
 
 	// Pre-add the container in case we stop before the next, more useful,
 	// AddContainer call. This ensures we have a way to get the container if
