@@ -12,10 +12,10 @@
 > for the prototype, but all of it is important for using containerd.
 >
 > * [x] skeleton code for containerd client
-> * [ ] image pull
-> * [ ] image pull from private registries (including ECR)
+> * [x] image pull
+> * [x] image pull from private registries (including ECR) (I think this works?)
 > * [ ] image lifecycle management (usage accounting + deletion)
-> * [ ] container launch
+> * [x] container launch (though not really much else)
 > * [ ] container lifecycle management (monitoring, exit code reporting,
 >   removal)
 > * [ ] container telemetry

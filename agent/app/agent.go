@@ -101,7 +101,7 @@ func newAgent(
 	log.Debugf("Loaded config: %s", cfg.String())
 
 	//dockerClient, err := engine.NewDockerGoClient(dockerclient.NewFactory(cfg.DockerEndpoint), cfg)
-	dockerClient, err := engine.NewContainerdClient()
+	dockerClient, err := engine.NewContainerdClient(cfg)
 	if err != nil {
 		// This is also non terminal in the current config
 		log.Criticalf("Error creating Docker client: %v", err)

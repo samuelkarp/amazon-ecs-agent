@@ -1,23 +1,36 @@
 package engine
 
 import (
+	"crypto/tls"
+	"encoding/json"
+	"net"
+	"net/http"
+	"strings"
+	"syscall"
 	"time"
 
-	"github.com/pkg/errors"
-
-	"golang.org/x/net/context"
-
-	"syscall"
-
-	"strings"
-
 	"github.com/aws/amazon-ecs-agent/agent/api"
+	"github.com/aws/amazon-ecs-agent/agent/config"
+	"github.com/aws/amazon-ecs-agent/agent/ecr"
+	"github.com/aws/amazon-ecs-agent/agent/engine/dockerauth"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
+
 	"github.com/cihub/seelog"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/remotes"
+	dockerresolver "github.com/containerd/containerd/remotes/docker"
 	docker "github.com/fsouza/go-dockerclient"
+	"github.com/pkg/errors"
+	"golang.org/x/net/context"
 )
+
+/*
+ Notes:
+ * The DockerClient interface isn't super clean. We should generalize the interface a bit more.
+ * Auth data for pull is handled explicitly in dockerGoClient, but should really be injected by the caller.
+ * Most of the methods take a timeout parameter, but should really take a context (with a deadline)
+*/
 
 type unimplementedError struct {
 	error
@@ -30,12 +43,10 @@ func (unimplementedError) ErrorName() string {
 var unimplemented = unimplementedError{errors.New("unimplemented")}
 
 const (
-	containerdImage = "docker.io/library/busybox:latest" // TODO remove
-
 	ecsNamespace = "ecs-test"
 )
 
-func NewContainerdClient() (DockerClient, error) {
+func NewContainerdClient(cfg *config.Config) (DockerClient, error) {
 	client, err := containerd.New("/run/containerd/containerd.sock")
 	if err != nil {
 		return nil, err
@@ -45,14 +56,28 @@ func NewContainerdClient() (DockerClient, error) {
 		return nil, err
 	}
 	seelog.Debugf("CONTAINERD VERSION %s %s", version.Version, version.Revision)
+
+	var dockerAuthData json.RawMessage
+	if cfg.EngineAuthData != nil {
+		dockerAuthData = cfg.EngineAuthData.Contents()
+	}
+
 	return &containerdClient{
-		client: client,
+		client:           client,
+		ecrClientFactory: ecr.NewECRFactory(cfg.AcceptInsecureCert),
+		auth:             dockerauth.NewDockerAuthProvider(cfg.EngineAuthType, dockerAuthData),
+		config:           cfg,
 	}, nil
 }
 
 // containerdClient implements DockerClient interface
 type containerdClient struct {
 	client *containerd.Client
+
+	// TODO shouldn't have ecrClientFactory + auth here, should be injected during pull
+	ecrClientFactory ecr.ECRFactory
+	auth             dockerauth.DockerAuthProvider
+	config           *config.Config
 }
 
 // SupportedVersions returns a slice of the supported docker versions (or at least supposedly supported).
@@ -73,8 +98,16 @@ func (c *containerdClient) ContainerEvents(ctx context.Context) (<-chan DockerCo
 func (c *containerdClient) PullImage(image string, authData *api.RegistryAuthenticationData) DockerContainerMetadata {
 	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
 	ref := imageToRef(image)
+	authConfig, err := c.getAuthdata(image, authData)
+	if err != nil {
+		return DockerContainerMetadata{Error: CannotPullContainerError{err}}
+	}
+	resolver, err := c.getResolver(ctx, authConfig)
+	if err != nil {
+		return DockerContainerMetadata{Error: CannotPullContainerError{err}}
+	}
 	seelog.Debugf("Pulling %s.  No progress will be shown.", ref)
-	pullResponse, err := c.client.Pull(ctx, ref, containerd.WithPullUnpack)
+	pullResponse, err := c.client.Pull(ctx, ref, containerd.WithResolver(resolver), containerd.WithPullUnpack)
 	if err != nil {
 		return DockerContainerMetadata{Error: CannotPullContainerError{err}}
 	}
@@ -110,11 +143,57 @@ func imageToRef(image string) string {
 	return image
 }
 
+// getResolver prepares the resolver from the environment and options.
+func (c *containerdClient) getResolver(ctx context.Context, authConfig docker.AuthConfiguration) (remotes.Resolver, error) {
+	username := authConfig.Username
+	secret := authConfig.Password
+	options := dockerresolver.ResolverOptions{}
+
+	options.Credentials = func(host string) (string, string, error) {
+		// Only one host
+		return username, secret, nil
+	}
+
+	tr := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+			DualStack: true,
+		}).DialContext,
+		MaxIdleConns:        10,
+		IdleConnTimeout:     30 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: c.config.AcceptInsecureCert,
+		},
+		ExpectContinueTimeout: 5 * time.Second,
+	}
+
+	options.Client = &http.Client{
+		Transport: tr,
+	}
+
+	return dockerresolver.NewResolver(options), nil
+}
+
+func (c *containerdClient) getAuthdata(image string, authData *api.RegistryAuthenticationData) (docker.AuthConfiguration, error) {
+	if authData == nil || authData.Type != "ecr" {
+		return c.auth.GetAuthconfig(image)
+	}
+	provider := dockerauth.NewECRAuthProvider(authData.ECRAuthData, c.ecrClientFactory)
+	authConfig, err := provider.GetAuthconfig(image)
+	if err != nil {
+		return authConfig, CannotPullECRContainerError{err}
+	}
+	return authConfig, nil
+}
+
 func (c *containerdClient) CreateContainer(dockerConfig *docker.Config, dockerHostConfig *docker.HostConfig, name string, timeout time.Duration) DockerContainerMetadata {
 	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
-	image, err := c.client.GetImage(ctx, containerdImage) // TODO
+	image, err := c.client.GetImage(ctx, imageToRef(dockerConfig.Image))
 	if err != nil {
-		wrapped := errors.Wrapf(err, "containerd create: failed to resolve image %s", containerdImage)
+		wrapped := errors.Wrapf(err, "containerd create: failed to resolve image %s", image)
 		return DockerContainerMetadata{Error: CannotCreateContainerError{wrapped}}
 	}
 	opts := []containerd.SpecOpts{
@@ -153,7 +232,7 @@ func (c *containerdClient) StartContainer(name string, timeout time.Duration) Do
 		wrapped := errors.Wrapf(err, "containerd start: failed to create task for container with id %s", id)
 		return DockerContainerMetadata{Error: CannotStartContainerError{wrapped}}
 	}
-	err = task.CloseStdin(ctx)
+	err = task.CloseIO(ctx, containerd.WithStdinCloser)
 	if err != nil {
 		seelog.Error(err)
 		return DockerContainerMetadata{Error: CannotStartContainerError{err}}
