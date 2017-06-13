@@ -200,7 +200,8 @@ func (c *containerdClient) CreateContainer(dockerConfig *docker.Config, dockerHo
 		containerd.WithImageConfig(ctx, image),
 		// env
 		// mounts
-		containerd.WithProcessArgs("/bin/sh", "-c", "echo '**********hello'; sleep 600; echo '**********bye'"),
+		containerd.WithProcessArgs(processArgs(dockerConfig.Entrypoint, dockerConfig.Cmd)...), // TODO
+		// withEntrypointCommand(dockerConfig.Entrypoint, dockerConfig.Cmd),
 	}
 	spec, err := containerd.GenerateSpec(opts...)
 	if err != nil {
@@ -217,6 +218,27 @@ func (c *containerdClient) CreateContainer(dockerConfig *docker.Config, dockerHo
 
 	return DockerContainerMetadata{DockerID: container.ID()}
 }
+
+/*
+// TODO This is broken:
+// cannot use func literal (type func(*"github.com/opencontainers/runtime-spec/specs-go".Spec) error) as type containerd.SpecOpts in return argument
+func withEntrypointCommand(entrypoint, cmd []string) containerd.SpecOpts {
+	return func(s *specs.Spec) error {
+		s.Process.Args = processArgs(entrypoint, cmd)
+		return nil
+	}
+}
+*/
+
+// processArgs converts Docker-style entrypoint and cmd into a set of process args for containerd
+func processArgs(entrypoint, cmd []string) []string {
+	// see https://github.com/moby/moby/blob/v17.03.1-ce/daemon/container.go#L169-L174 for how Docker does this
+	if len(entrypoint) == 0 {
+		return cmd
+	}
+	return append(entrypoint, cmd...)
+}
+
 func (c *containerdClient) StartContainer(name string, timeout time.Duration) DockerContainerMetadata {
 	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
 	id := name
