@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -14,7 +16,6 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/ecr"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerauth"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
-
 	"github.com/cihub/seelog"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/namespaces"
@@ -248,7 +249,8 @@ func (c *containerdClient) StartContainer(name string, timeout time.Duration) Do
 		wrapped := errors.Wrapf(err, "containerd start: failed to get container with id %s", id)
 		return DockerContainerMetadata{Error: CannotStartContainerError{wrapped}}
 	}
-	task, err := container.NewTask(ctx, containerd.Stdio)
+	stdio, err := containerStdio(name)
+	task, err := container.NewTask(ctx, stdio)
 	if err != nil {
 		seelog.Error(err)
 		wrapped := errors.Wrapf(err, "containerd start: failed to create task for container with id %s", id)
@@ -268,6 +270,29 @@ func (c *containerdClient) StartContainer(name string, timeout time.Duration) Do
 
 	return DockerContainerMetadata{DockerID: container.ID()}
 }
+
+func containerStdio(name string) (containerd.IOCreation, error) {
+	stdoutPath, stderrPath := containerStdioPaths(name)
+	stdout, err := os.Create(stdoutPath)
+	if err != nil {
+		return nil, err
+	}
+
+	stderr, err := os.Create(stderrPath)
+	if err != nil {
+		return nil, err
+	}
+	return containerd.NewIO(os.Stdin, stdout, stderr), nil
+}
+
+func containerStdioPaths(name string) (string, string) {
+	logdir := os.Getenv("ECS_LOGDIR") // TODO
+	if logdir == "" {
+		logdir = "/tmp"
+	}
+	return filepath.Join(logdir, name+"-stdout"), filepath.Join(logdir, name+"-stderr")
+}
+
 func (c *containerdClient) StopContainer(name string, timeout time.Duration) DockerContainerMetadata {
 	ctx := namespaces.WithNamespace(context.TODO(), ecsNamespace)
 	id := name
@@ -358,9 +383,20 @@ func (c *containerdClient) RemoveContainer(name string, timeout time.Duration) e
 	err = container.Delete(ctx)
 	if err != nil {
 		seelog.Error(err)
-		return errors.Wrapf(err, "containerd stop: failed to delete container with id %s", id)
+		return errors.Wrapf(err, "containerd remove: failed to delete container with id %s", id)
 	}
-	return unimplemented
+
+	stdoutPath, stderrPath := containerStdioPaths(name)
+	err = os.Remove(stdoutPath)
+	if err != nil {
+		return errors.Wrapf(err, "containerd remove: failed to delete %s", stdoutPath)
+	}
+	err = os.Remove(stderrPath)
+	if err != nil {
+		return errors.Wrapf(err, "containerd remove: failed to delete %s", stderrPath)
+	}
+
+	return nil
 }
 
 func (c *containerdClient) ListContainers(bool, time.Duration) ListContainersResponse {
