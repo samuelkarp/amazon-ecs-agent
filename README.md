@@ -28,6 +28,19 @@
 > * [ ] integration tests
 > * [ ] functional tests
 > * [ ] more things I forgot to enumerate?
+>
+> ## To fix
+> 
+> Here's work remaining that is less prototype-work and is really more
+> necessary to bring this to production:
+>
+> * [ ] Move translation from task to `Config`/`HostConfig` into the Docker
+>   engine instead of `api`
+> * [ ] Use `context.Context` instead of `time.Duration` for timeouts
+> * [ ] Move name/ID generation into the `ContainerEngine` instead of the
+    `TaskEngine` 
+> * [ ] Handle "internal" containers differently; should not be containers with
+>   containerd (empty host volumes + task networking)
 
 [![Build Status](https://travis-ci.org/aws/amazon-ecs-agent.svg?branch=master)](https://travis-ci.org/aws/amazon-ecs-agent)
 [![Build status](https://ci.appveyor.com/api/projects/status/upkhbwf2oc0srglt?svg=true)](https://ci.appveyor.com/project/AmazonECS/amazon-ecs-agent)
