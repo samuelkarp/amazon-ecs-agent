@@ -22,8 +22,6 @@ import (
 
 	"golang.org/x/net/context"
 
-	"strings"
-
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
@@ -590,13 +588,14 @@ func (engine *DockerTaskEngine) createContainer(task *api.Task, container *api.C
 	}
 
 	taskID := ""
-	taskSplit := strings.SplitN(task.Arn, "/", 2)
-	if len(taskSplit) == 2 {
-		taskID = taskSplit[1]
-	} else {
-		// TODO something better
-		taskID = utils.RandHex()
-	}
+	//taskSplit := strings.SplitN(task.Arn, "/", 2)
+	//if len(taskSplit) == 2 {
+	//	taskID = taskSplit[1]
+	//} else {
+	// TODO something better
+	// TODO fix this again
+	taskID = utils.RandHex()
+	//}
 
 	containerName := "ecs-" + task.Family + "-" + task.Version + "-" + name + "-" + taskID
 

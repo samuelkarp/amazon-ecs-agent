@@ -18,6 +18,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
 	"github.com/cihub/seelog"
 	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/remotes"
 	dockerresolver "github.com/containerd/containerd/remotes/docker"
@@ -210,7 +211,7 @@ func (c *containerdClient) CreateContainer(dockerConfig *docker.Config, dockerHo
 		return DockerContainerMetadata{Error: CannotCreateContainerError{wrapped}}
 	}
 	id := name
-	container, err := c.client.NewContainer(ctx, id, containerd.WithSpec(spec), containerd.WithNewRootFS(id, image), containerd.WithImage(image))
+	container, err := c.client.NewContainer(ctx, id, containerd.WithSpec(spec), containerd.WithNewSnapshot(id, image), containerd.WithImage(image))
 	if err != nil {
 		wrapped := errors.Wrap(err, "containerd create: failed to create container")
 		return DockerContainerMetadata{Error: CannotCreateContainerError{wrapped}}
@@ -326,6 +327,7 @@ func (c *containerdClient) StopContainer(name string, timeout time.Duration) Doc
 	exitCode := int(status)
 	return DockerContainerMetadata{DockerID: id, ExitCode: &exitCode}
 }
+
 func (c *containerdClient) DescribeContainer(id string) (api.ContainerStatus, DockerContainerMetadata) {
 	dockerContainer, err := c.InspectContainer(id, inspectContainerTimeout)
 	if err != nil {
@@ -343,13 +345,13 @@ func (c *containerdClient) InspectContainer(id string, timeout time.Duration) (*
 
 	}
 	task, err := container.Task(ctx, nil)
-	if err != nil && err != containerd.ErrNoRunningTask {
+	if err != nil && errdefs.IsNotFound(err) {
 		seelog.Error(err)
 		return nil, errors.Wrapf(err, "containerd inspect: failed to get task for container with id %s", id)
 	}
 
 	state := docker.State{}
-	if err == containerd.ErrNoRunningTask {
+	if errdefs.IsNotFound(err) {
 		state.Status = string(containerd.Stopped)
 		state.Running = false
 	} else {

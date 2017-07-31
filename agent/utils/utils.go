@@ -17,7 +17,6 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
-	"math"
 	"math/big"
 	"reflect"
 	"strconv"
@@ -91,8 +90,9 @@ OuterLoop:
 }
 
 func RandHex() string {
-	randInt, _ := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
-	out := make([]byte, 10)
+	// TOOD fix this
+	randInt, _ := rand.Int(rand.Reader, big.NewInt(2048))
+	out := make([]byte, 5)
 	binary.PutVarint(out, randInt.Int64())
 	return hex.EncodeToString(out)
 }
