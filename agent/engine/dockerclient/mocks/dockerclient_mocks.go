@@ -1,4 +1,4 @@
-// Copyright 2015-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2015-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -43,14 +43,24 @@ func (_m *MockFactory) EXPECT() *_MockFactoryRecorder {
 	return _m.recorder
 }
 
-func (_m *MockFactory) FindAvailableVersions() []dockerclient.DockerVersion {
-	ret := _m.ctrl.Call(_m, "FindAvailableVersions")
+func (_m *MockFactory) FindKnownAPIVersions() []dockerclient.DockerVersion {
+	ret := _m.ctrl.Call(_m, "FindKnownAPIVersions")
 	ret0, _ := ret[0].([]dockerclient.DockerVersion)
 	return ret0
 }
 
-func (_mr *_MockFactoryRecorder) FindAvailableVersions() *gomock.Call {
-	return _mr.mock.ctrl.RecordCall(_mr.mock, "FindAvailableVersions")
+func (_mr *_MockFactoryRecorder) FindKnownAPIVersions() *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "FindKnownAPIVersions")
+}
+
+func (_m *MockFactory) FindSupportedAPIVersions() []dockerclient.DockerVersion {
+	ret := _m.ctrl.Call(_m, "FindSupportedAPIVersions")
+	ret0, _ := ret[0].([]dockerclient.DockerVersion)
+	return ret0
+}
+
+func (_mr *_MockFactoryRecorder) FindSupportedAPIVersions() *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "FindSupportedAPIVersions")
 }
 
 func (_m *MockFactory) GetClient(_param0 dockerclient.DockerVersion) (dockeriface.Client, error) {

@@ -54,6 +54,18 @@ const (
 	// DefaultDockerStopTimeout specifies the value for container stop timeout duration
 	DefaultDockerStopTimeout = 30 * time.Second
 
+	// DefaultImageCleanupTimeInterval specifies the default value for image cleanup duration. It is used to
+	// remove the images pulled by agent.
+	DefaultImageCleanupTimeInterval = 30 * time.Minute
+
+	// DefaultNumImagesToDeletePerCycle specifies the default number of images to delete when agent performs
+	// image cleanup.
+	DefaultNumImagesToDeletePerCycle = 5
+
+	//DefaultImageDeletionAge specifies the default value for minimum amount of elapsed time after an image
+	// has been pulled before it can be deleted.
+	DefaultImageDeletionAge = 1 * time.Hour
+
 	// minimumTaskCleanupWaitDuration specifies the minimum duration to wait before cleaning up
 	// a task's container. This is used to enforce sane values for the config.TaskCleanupWaitDuration field.
 	minimumTaskCleanupWaitDuration = 1 * time.Minute
@@ -61,8 +73,13 @@ const (
 	// minimumDockerStopTimeout specifies the minimum value for docker StopContainer API
 	minimumDockerStopTimeout = 1 * time.Second
 
-	// defaultAuditLogFile specifies the default audit log filename
-	defaultCredentialsAuditLogFile = "/log/audit.log"
+	// minimumImageCleanupInterval specifies the minimum time for agent to wait before performing
+	// image cleanup.
+	minimumImageCleanupInterval = 10 * time.Minute
+
+	// minimumNumImagesToDeletePerCycle specifies the minimum number of images that to be deleted when
+	// performing image cleanup.
+	minimumNumImagesToDeletePerCycle = 1
 )
 
 // Merge merges two config files, preferring the ones on the left. Any nil or
@@ -159,40 +176,24 @@ func (cfg *Config) trimWhitespace() {
 	}
 }
 
-func DefaultConfig() Config {
-	return Config{
-		DockerEndpoint:              "unix:///var/run/docker.sock",
-		ReservedPorts:               []uint16{SSHPort, DockerReservedPort, DockerReservedSSLPort, AgentIntrospectionPort, AgentCredentialsPort},
-		ReservedPortsUDP:            []uint16{},
-		DataDir:                     "/data/",
-		DisableMetrics:              false,
-		ReservedMemory:              0,
-		AvailableLoggingDrivers:     []dockerclient.LoggingDriver{dockerclient.JsonFileDriver},
-		TaskCleanupWaitDuration:     DefaultTaskCleanupWaitDuration,
-		DockerStopTimeout:           DefaultDockerStopTimeout,
-		CredentialsAuditLogFile:     defaultCredentialsAuditLogFile,
-		CredentialsAuditLogDisabled: false,
-	}
-}
-
-func fileConfig() Config {
+func fileConfig() (Config, error) {
 	config_file := utils.DefaultIfBlank(os.Getenv("ECS_AGENT_CONFIG_FILE_PATH"), "/etc/ecs_container_agent/config.json")
+	config := Config{}
 
 	file, err := os.Open(config_file)
 	if err != nil {
-		return Config{}
+		return config, nil
 	}
 	data, err := ioutil.ReadAll(file)
 	if err != nil {
 		seelog.Errorf("Unable to read config file, err %v", err)
-		return Config{}
+		return config, err
 	}
 	if strings.TrimSpace(string(data)) == "" {
 		// empty file, not an error
-		return Config{}
+		return config, nil
 	}
 
-	config := Config{}
 	err = json.Unmarshal(data, &config)
 	if err != nil {
 		seelog.Errorf("Error reading config json data, err %v", err)
@@ -202,12 +203,13 @@ func fileConfig() Config {
 	if utils.ZeroOrNil(config.Cluster) && !utils.ZeroOrNil(config.ClusterArn) {
 		config.Cluster = config.ClusterArn
 	}
-	return config
+	return config, nil
 }
 
 // environmentConfig reads the given configs from the environment and attempts
 // to convert them to the given type
-func environmentConfig() Config {
+func environmentConfig() (Config, error) {
+	var errs []error
 	endpoint := os.Getenv("ECS_BACKEND_HOST")
 
 	clusterRef := os.Getenv("ECS_CLUSTER")
@@ -237,7 +239,8 @@ func environmentConfig() Config {
 	// invalid parse
 	// Blank is not a warning; we have sane defaults
 	if err != io.EOF && err != nil {
-		seelog.Warnf("Invalid format for \"ECS_RESERVED_PORTS\" environment variable; expected a JSON array like [1,2,3]. err %v", err)
+		err := fmt.Errorf("Invalid format for \"ECS_RESERVED_PORTS\" environment variable; expected a JSON array like [1,2,3]. err %v", err)
+		seelog.Warn(err)
 	}
 
 	reservedPortUDPEnv := os.Getenv("ECS_RESERVED_PORTS_UDP")
@@ -248,7 +251,8 @@ func environmentConfig() Config {
 	// invalid parse
 	// Blank is not a warning; we have sane defaults
 	if err != io.EOF && err != nil {
-		seelog.Warnf("Invalid format for \"ECS_RESERVED_PORTS_UDP\" environment variable; expected a JSON array like [1,2,3]. err %v", err)
+		err := fmt.Errorf("Invalid format for \"ECS_RESERVED_PORTS_UDP\" environment variable; expected a JSON array like [1,2,3]. err %v", err)
+		seelog.Warn(err)
 	}
 
 	updateDownloadDir := os.Getenv("ECS_UPDATE_DOWNLOAD_DIR")
@@ -275,42 +279,78 @@ func environmentConfig() Config {
 	// invalid parse
 	// Blank is not a warning; we have sane defaults
 	if err != io.EOF && err != nil {
-		seelog.Warnf("Invalid format for \"ECS_AVAILABLE_LOGGING_DRIVERS\" environment variable; expected a JSON array like [\"json-file\",\"syslog\"]. err %v", err)
+		err := fmt.Errorf("Invalid format for \"ECS_AVAILABLE_LOGGING_DRIVERS\" environment variable; expected a JSON array like [\"json-file\",\"syslog\"]. err %v", err)
+		seelog.Warn(err)
 	}
 
 	privilegedDisabled := utils.ParseBool(os.Getenv("ECS_DISABLE_PRIVILEGED"), false)
 	seLinuxCapable := utils.ParseBool(os.Getenv("ECS_SELINUX_CAPABLE"), false)
 	appArmorCapable := utils.ParseBool(os.Getenv("ECS_APPARMOR_CAPABLE"), false)
 	taskIAMRoleEnabled := utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_IAM_ROLE"), false)
+	taskIAMRoleEnabledForNetworkHost := utils.ParseBool(os.Getenv("ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST"), false)
 
 	credentialsAuditLogFile := os.Getenv("ECS_AUDIT_LOGFILE")
 	credentialsAuditLogDisabled := utils.ParseBool(os.Getenv("ECS_AUDIT_LOGFILE_DISABLED"), false)
 
-	return Config{
-		Cluster:                     clusterRef,
-		APIEndpoint:                 endpoint,
-		AWSRegion:                   awsRegion,
-		DockerEndpoint:              dockerEndpoint,
-		ReservedPorts:               reservedPorts,
-		ReservedPortsUDP:            reservedPortsUDP,
-		DataDir:                     dataDir,
-		Checkpoint:                  checkpoint,
-		EngineAuthType:              engineAuthType,
-		EngineAuthData:              NewSensitiveRawMessage([]byte(engineAuthData)),
-		UpdatesEnabled:              updatesEnabled,
-		UpdateDownloadDir:           updateDownloadDir,
-		DisableMetrics:              disableMetrics,
-		ReservedMemory:              reservedMemory,
-		AvailableLoggingDrivers:     availableLoggingDrivers,
-		PrivilegedDisabled:          privilegedDisabled,
-		SELinuxCapable:              seLinuxCapable,
-		AppArmorCapable:             appArmorCapable,
-		TaskCleanupWaitDuration:     taskCleanupWaitDuration,
-		TaskIAMRoleEnabled:          taskIAMRoleEnabled,
-		DockerStopTimeout:           dockerStopTimeout,
-		CredentialsAuditLogFile:     credentialsAuditLogFile,
-		CredentialsAuditLogDisabled: credentialsAuditLogDisabled,
+	imageCleanupDisabled := utils.ParseBool(os.Getenv("ECS_DISABLE_IMAGE_CLEANUP"), false)
+	minimumImageDeletionAge := parseEnvVariableDuration("ECS_IMAGE_MINIMUM_CLEANUP_AGE")
+	imageCleanupInterval := parseEnvVariableDuration("ECS_IMAGE_CLEANUP_INTERVAL")
+	numImagesToDeletePerCycleEnvVal := os.Getenv("ECS_NUM_IMAGES_DELETE_PER_CYCLE")
+	numImagesToDeletePerCycle, err := strconv.Atoi(numImagesToDeletePerCycleEnvVal)
+	if numImagesToDeletePerCycleEnvVal != "" && err != nil {
+		seelog.Warnf("Invalid format for \"ECS_NUM_IMAGES_DELETE_PER_CYCLE\", expected an integer. err %v", err)
 	}
+
+	instanceAttributesEnv := os.Getenv("ECS_INSTANCE_ATTRIBUTES")
+	attributeDecoder := json.NewDecoder(strings.NewReader(instanceAttributesEnv))
+	var instanceAttributes map[string]string
+
+	err = attributeDecoder.Decode(&instanceAttributes)
+	if err != io.EOF && err != nil {
+		err := fmt.Errorf("Invalid format for ECS_INSTANCE_ATTRIBUTES. Expected a json hash")
+		seelog.Warn(err)
+		errs = append(errs, err)
+	}
+	for attributeKey, attributeValue := range instanceAttributes {
+		seelog.Debugf("Setting instance attribute %v: %v", attributeKey, attributeValue)
+	}
+
+	if len(errs) > 0 {
+		err = utils.NewMultiError(errs...)
+	} else {
+		err = nil
+	}
+	return Config{
+		Cluster:                          clusterRef,
+		APIEndpoint:                      endpoint,
+		AWSRegion:                        awsRegion,
+		DockerEndpoint:                   dockerEndpoint,
+		ReservedPorts:                    reservedPorts,
+		ReservedPortsUDP:                 reservedPortsUDP,
+		DataDir:                          dataDir,
+		Checkpoint:                       checkpoint,
+		EngineAuthType:                   engineAuthType,
+		EngineAuthData:                   NewSensitiveRawMessage([]byte(engineAuthData)),
+		UpdatesEnabled:                   updatesEnabled,
+		UpdateDownloadDir:                updateDownloadDir,
+		DisableMetrics:                   disableMetrics,
+		ReservedMemory:                   reservedMemory,
+		AvailableLoggingDrivers:          availableLoggingDrivers,
+		PrivilegedDisabled:               privilegedDisabled,
+		SELinuxCapable:                   seLinuxCapable,
+		AppArmorCapable:                  appArmorCapable,
+		TaskCleanupWaitDuration:          taskCleanupWaitDuration,
+		TaskIAMRoleEnabled:               taskIAMRoleEnabled,
+		DockerStopTimeout:                dockerStopTimeout,
+		CredentialsAuditLogFile:          credentialsAuditLogFile,
+		CredentialsAuditLogDisabled:      credentialsAuditLogDisabled,
+		TaskIAMRoleEnabledForNetworkHost: taskIAMRoleEnabledForNetworkHost,
+		ImageCleanupDisabled:             imageCleanupDisabled,
+		MinimumImageDeletionAge:          minimumImageDeletionAge,
+		ImageCleanupInterval:             imageCleanupInterval,
+		NumImagesToDeletePerCycle:        numImagesToDeletePerCycle,
+		InstanceAttributes:               instanceAttributes,
+	}, err
 }
 
 func parseEnvVariableUint16(envVar string) uint16 {
@@ -357,12 +397,25 @@ func ec2MetadataConfig(ec2client ec2.EC2MetadataClient) Config {
 // error is returned, however, if the config is incomplete in some way that is
 // considered fatal.
 func NewConfig(ec2client ec2.EC2MetadataClient) (config *Config, err error) {
-	ctmp := environmentConfig() //Environment overrides all else
-	config = &ctmp
+	var errs []error
+	var errTmp error
+	envConfig, errTmp := environmentConfig() //Environment overrides all else
+	if errTmp != nil {
+		errs = append(errs, errTmp)
+	}
+	config = &envConfig
 	defer func() {
 		config.trimWhitespace()
 		config.Merge(DefaultConfig())
-		err = config.validate()
+		errTmp = config.validateAndOverrideBounds()
+		if errTmp != nil {
+			errs = append(errs, errTmp)
+		}
+		if len(errs) != 0 {
+			err = utils.NewMultiError(errs...)
+		} else {
+			err = nil
+		}
 	}()
 
 	if config.complete() {
@@ -370,25 +423,23 @@ func NewConfig(ec2client ec2.EC2MetadataClient) (config *Config, err error) {
 		return config, nil
 	}
 
-	config.Merge(fileConfig())
+	fcfg, errTmp := fileConfig()
+	if errTmp != nil {
+		errs = append(errs, errTmp)
+	}
+	config.Merge(fcfg)
 
 	if config.AWSRegion == "" {
 		// Get it from metadata only if we need to (network io)
 		config.Merge(ec2MetadataConfig(ec2client))
 	}
 
-	// If a value has been set for taskCleanupWaitDuration and the value is less than the minimum allowed cleanup duration,
-	// print a warning and override it
-	if config.TaskCleanupWaitDuration < minimumTaskCleanupWaitDuration {
-		seelog.Warnf("Invalid value for task cleanup duration, will be overridden to %v, parsed value %v, minimum threshold %v", DefaultTaskCleanupWaitDuration.String(), config.TaskCleanupWaitDuration, minimumTaskCleanupWaitDuration)
-		config.TaskCleanupWaitDuration = DefaultTaskCleanupWaitDuration
-	}
-
 	return config, err
 }
 
-// validate performs validation over members of the Config struct
-func (config *Config) validate() error {
+// validateAndOverrideBounds performs validation over members of the Config struct
+// and check the value against the minimum required value.
+func (config *Config) validateAndOverrideBounds() error {
 	err := config.checkMissingAndDepreciated()
 	if err != nil {
 		return err
@@ -407,6 +458,25 @@ func (config *Config) validate() error {
 	if len(badDrivers) > 0 {
 		return errors.New("Invalid logging drivers: " + strings.Join(badDrivers, ", "))
 	}
+
+	// If a value has been set for taskCleanupWaitDuration and the value is less than the minimum allowed cleanup duration,
+	// print a warning and override it
+	if config.TaskCleanupWaitDuration < minimumTaskCleanupWaitDuration {
+		seelog.Warnf("Invalid value for image cleanup duration, will be overridden with the default value: %s. Parsed value: %v, minimum value: %v.", DefaultTaskCleanupWaitDuration.String(), config.TaskCleanupWaitDuration, minimumTaskCleanupWaitDuration)
+		config.TaskCleanupWaitDuration = DefaultTaskCleanupWaitDuration
+	}
+
+	if config.ImageCleanupInterval < minimumImageCleanupInterval {
+		seelog.Warnf("Invalid value for image cleanup duration, will be overridden with the default value: %s. Parsed value: %v, minimum value: %v.", DefaultImageCleanupTimeInterval.String(), config.ImageCleanupInterval, minimumImageCleanupInterval)
+		config.ImageCleanupInterval = DefaultImageCleanupTimeInterval
+	}
+
+	if config.NumImagesToDeletePerCycle < minimumNumImagesToDeletePerCycle {
+		seelog.Warnf("Invalid value for number of images to delete for image cleanup, will be overriden with the default value: %d. Parsed value: %d, minimum value: %d.", DefaultImageDeletionAge, config.NumImagesToDeletePerCycle, minimumNumImagesToDeletePerCycle)
+		config.NumImagesToDeletePerCycle = DefaultNumImagesToDeletePerCycle
+	}
+
+	config.platformOverrides()
 
 	return nil
 }

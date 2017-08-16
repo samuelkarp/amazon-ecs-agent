@@ -1,4 +1,5 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// +build !integration
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -25,20 +26,20 @@ import (
 
 func createTestContainer(num int) *api.Container {
 	return &api.Container{
-		Name:          "busybox-" + strconv.Itoa(num),
-		Image:         "busybox:latest",
-		Essential:     true,
-		DesiredStatus: api.ContainerRunning,
+		Name:                "busybox-" + strconv.Itoa(num),
+		Image:               "busybox:latest",
+		Essential:           true,
+		DesiredStatusUnsafe: api.ContainerRunning,
 	}
 }
 
 func createTestTask(arn string, numContainers int) *api.Task {
 	task := &api.Task{
-		Arn:           arn,
-		Family:        arn,
-		Version:       "1",
-		DesiredStatus: api.TaskRunning,
-		Containers:    []*api.Container{},
+		Arn:                 arn,
+		Family:              arn,
+		Version:             "1",
+		DesiredStatusUnsafe: api.TaskRunning,
+		Containers:          []*api.Container{},
 	}
 
 	for i := 0; i < numContainers; i++ {
@@ -47,12 +48,12 @@ func createTestTask(arn string, numContainers int) *api.Task {
 	return task
 }
 
-func decodeEqual(t *testing.T, state *dockerstate.DockerTaskEngineState) *dockerstate.DockerTaskEngineState {
+func decodeEqual(t *testing.T, state dockerstate.TaskEngineState) dockerstate.TaskEngineState {
 	data, err := json.Marshal(&state)
 	if err != nil {
 		t.Error(err)
 	}
-	otherState := dockerstate.NewDockerTaskEngineState()
+	otherState := dockerstate.NewTaskEngineState()
 	err = json.Unmarshal(data, &otherState)
 	if err != nil {
 		t.Error(err)
@@ -65,14 +66,14 @@ func decodeEqual(t *testing.T, state *dockerstate.DockerTaskEngineState) *docker
 }
 
 func TestJsonEncoding(t *testing.T) {
-	state := dockerstate.NewDockerTaskEngineState()
+	state := dockerstate.NewTaskEngineState()
 	decodeEqual(t, state)
 
-	testState := dockerstate.NewDockerTaskEngineState()
+	testState := dockerstate.NewTaskEngineState()
 	testTask := createTestTask("test1", 1)
 	testState.AddTask(testTask)
 	for i, cont := range testTask.Containers {
-		testState.AddContainer(&api.DockerContainer{DockerId: "docker" + strconv.Itoa(i), DockerName: "someName", Container: cont}, testTask)
+		testState.AddContainer(&api.DockerContainer{DockerID: "docker" + strconv.Itoa(i), DockerName: "someName", Container: cont}, testTask)
 	}
 	other := decodeEqual(t, testState)
 	_, ok := other.ContainerMapByArn("test1")

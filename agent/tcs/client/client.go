@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -15,27 +15,24 @@ package tcsclient
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
-	"github.com/aws/amazon-ecs-agent/agent/logger"
+	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/stats"
 	"github.com/aws/amazon-ecs-agent/agent/tcs/model/ecstcs"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/aws/amazon-ecs-agent/agent/wsclient"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/gorilla/websocket"
+	"github.com/cihub/seelog"
 )
 
 // tasksInMessage is the maximum number of tasks that can be sent in a message to the backend
 // This is a very conservative estimate assuming max allowed string lengths for all fields.
 const tasksInMessage = 10
-
-var log = logger.ForModule("tcs client")
 
 // clientServer implements wsclient.ClientServer interface for metrics backend.
 type clientServer struct {
@@ -49,19 +46,18 @@ type clientServer struct {
 // New returns a client/server to bidirectionally communicate with the backend.
 // The returned struct should have both 'Connect' and 'Serve' called upon it
 // before being used.
-func New(url string, region string, credentialProvider *credentials.Credentials, acceptInvalidCert bool, statsEngine stats.Engine, publishMetricsInterval time.Duration) wsclient.ClientServer {
+func New(url string, cfg *config.Config, credentialProvider *credentials.Credentials, statsEngine stats.Engine, publishMetricsInterval time.Duration) wsclient.ClientServer {
 	cs := &clientServer{
 		statsEngine:            statsEngine,
 		publishTicker:          nil,
 		publishMetricsInterval: publishMetricsInterval,
 	}
 	cs.URL = url
-	cs.Region = region
+	cs.AgentConfig = cfg
 	cs.CredentialProvider = credentialProvider
-	cs.AcceptInvalidCert = acceptInvalidCert
 	cs.ServiceError = &tcsError{}
 	cs.RequestHandlers = make(map[string]wsclient.RequestHandler)
-	cs.TypeDecoder = &TcsDecoder{}
+	cs.TypeDecoder = NewTCSDecoder()
 	return cs
 }
 
@@ -69,9 +65,9 @@ func New(url string, region string, credentialProvider *credentials.Credentials,
 // AddRequestHandler). All request handlers should be added prior to making this
 // call as unhandled requests will be discarded.
 func (cs *clientServer) Serve() error {
-	log.Debug("Starting websocket poll loop")
-	if cs.Conn == nil {
-		return fmt.Errorf("nil connection")
+	seelog.Debug("TCS client starting websocket poll loop")
+	if !cs.IsReady() {
+		return fmt.Errorf("Websocket not ready for connections")
 	}
 
 	if cs.statsEngine == nil {
@@ -94,12 +90,12 @@ func (cs *clientServer) MakeRequest(input interface{}) error {
 		return err
 	}
 
-	log.Debug("sending payload", "payload", string(payload))
+	seelog.Debugf("TCS client sending payload: %s", string(payload))
 	data := cs.signRequest(payload)
 
 	// Over the wire we send something like
 	// {"type":"AckRequest","message":{"messageId":"xyz"}}
-	return cs.Conn.WriteMessage(websocket.TextMessage, data)
+	return cs.WriteMessage(data)
 }
 
 func (cs *clientServer) signRequest(payload []byte) []byte {
@@ -107,7 +103,7 @@ func (cs *clientServer) signRequest(payload []byte) []byte {
 	// NewRequest never returns an error if the url parses and we just verified
 	// it did above
 	request, _ := http.NewRequest("GET", cs.URL, reqBody)
-	utils.SignHTTPRequest(request, cs.Region, "ecs", cs.CredentialProvider, aws.ReadSeekCloser(reqBody))
+	utils.SignHTTPRequest(request, cs.AgentConfig.AWSRegion, "ecs", cs.CredentialProvider, aws.ReadSeekCloser(reqBody))
 
 	request.Header.Add("Host", request.Host)
 	var dataBuffer bytes.Buffer
@@ -126,28 +122,32 @@ func (cs *clientServer) Close() error {
 		cs.publishTicker.Stop()
 		cs.endPublish <- struct{}{}
 	}
-	if cs.Conn != nil {
-		return cs.Conn.Close()
-	}
-	return errors.New("No connection to close")
+
+	return cs.Disconnect()
 }
 
 // publishMetrics invokes the PublishMetricsRequest on the clientserver object.
 func (cs *clientServer) publishMetrics() {
 	if cs.publishTicker == nil {
-		log.Debug("publish ticker uninitialized")
+		seelog.Debug("Skipping publishing metrics. Publish ticker is uninitialized")
 		return
 	}
 
 	// Publish metrics immediately after we connect and wait for ticks. This makes
 	// sure that there is no data loss when a scheduled metrics publishing fails
 	// due to a connection reset.
-	cs.publishMetricsOnce()
+	err := cs.publishMetricsOnce()
+	if err != nil && err != stats.EmptyMetricsError {
+		seelog.Warnf("Error publishing metrics: %v", err)
+	}
 	// don't simply range over the ticker since its channel doesn't ever get closed
 	for {
 		select {
 		case <-cs.publishTicker.C:
-			cs.publishMetricsOnce()
+			err := cs.publishMetricsOnce()
+			if err != nil {
+				seelog.Warnf("Error publishing metrics: %v", err)
+			}
 		case <-cs.endPublish:
 			return
 		}
@@ -155,20 +155,21 @@ func (cs *clientServer) publishMetrics() {
 }
 
 // publishMetricsOnce is invoked by the ticker to periodically publish metrics to backend.
-func (cs *clientServer) publishMetricsOnce() {
+func (cs *clientServer) publishMetricsOnce() error {
 	// Get the list of objects to send to backend.
 	requests, err := cs.metricsToPublishMetricRequests()
 	if err != nil {
-		log.Warn("Error getting instance metrics", "err", err)
+		return err
 	}
 
 	// Make the publish metrics request to the backend.
 	for _, request := range requests {
 		err = cs.MakeRequest(request)
 		if err != nil {
-			log.Warn("Error publishing metrics", "err", err)
+			return err
 		}
 	}
+	return nil
 }
 
 // metricsToPublishMetricRequests gets task metrics and converts them to a list of PublishMetricRequest

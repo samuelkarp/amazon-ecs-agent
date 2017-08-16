@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -19,12 +19,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/amazon-ecs-agent/agent/logger"
+	"github.com/aws/amazon-ecs-agent/agent/config"
+	"github.com/aws/amazon-ecs-agent/agent/eventstream"
 	"github.com/aws/amazon-ecs-agent/agent/stats"
 	"github.com/aws/amazon-ecs-agent/agent/tcs/client"
 	"github.com/aws/amazon-ecs-agent/agent/tcs/model/ecstcs"
 	"github.com/aws/amazon-ecs-agent/agent/utils"
 	"github.com/aws/aws-sdk-go/aws/credentials"
+	log "github.com/cihub/seelog"
 )
 
 const (
@@ -33,31 +35,30 @@ const (
 	defaultPublishMetricsInterval = 20 * time.Second
 
 	// The maximum time to wait between heartbeats without disconnecting
-	heartbeatTimeout = 5 * time.Minute
-	heartbeatJitter  = 3 * time.Minute
+	defaultHeartbeatTimeout            = 5 * time.Minute
+	defaultHeartbeatJitter             = 3 * time.Minute
+	deregisterContainerInstanceHandler = "TCSDeregisterContainerInstanceHandler"
 )
-
-var log = logger.ForModule("tcs handler")
 
 // StartMetricsSession starts a metric session. It initializes the stats engine
 // and invokes StartSession.
 func StartMetricsSession(params TelemetrySessionParams) {
 	disabled, err := params.isTelemetryDisabled()
 	if err != nil {
-		log.Warn("Error getting telemetry config", "err", err)
+		log.Warnf("Error getting telemetry config: %v", err)
 		return
 	}
 
 	if !disabled {
-		statsEngine := stats.NewDockerStatsEngine(params.Cfg, params.DockerClient)
+		statsEngine := stats.NewDockerStatsEngine(params.Cfg, params.DockerClient, params.ContainerChangeEventStream)
 		err := statsEngine.MustInit(params.TaskEngine, params.Cfg.Cluster, params.ContainerInstanceArn)
 		if err != nil {
-			log.Warn("Error initializing metrics engine", "err", err)
+			log.Warnf("Error initializing metrics engine: %v", err)
 			return
 		}
 		err = StartSession(params, statsEngine)
 		if err != nil {
-			log.Warn("Error starting metrics session with backend", "err", err)
+			log.Warnf("Error starting metrics session with backend: %v", err)
 			return
 		}
 	} else {
@@ -76,27 +77,34 @@ func StartSession(params TelemetrySessionParams, statsEngine stats.Engine) error
 		if tcsError == nil || tcsError == io.EOF {
 			backoff.Reset()
 		} else {
-			log.Info("Error from tcs; backing off", "err", tcsError)
+			log.Infof("Error from tcs; backing off: %v", tcsError)
 			params.time().Sleep(backoff.Duration())
 		}
 	}
 }
 
 func startTelemetrySession(params TelemetrySessionParams, statsEngine stats.Engine) error {
-	tcsEndpoint, err := params.EcsClient.DiscoverTelemetryEndpoint(params.ContainerInstanceArn)
+	tcsEndpoint, err := params.ECSClient.DiscoverTelemetryEndpoint(params.ContainerInstanceArn)
 	if err != nil {
-		log.Error("Unable to discover poll endpoint", "err", err)
+		log.Errorf("Unable to discover poll endpoint: ", err)
 		return err
 	}
-	log.Debug("Connecting to TCS endpoint " + tcsEndpoint)
+	log.Debugf("Connecting to TCS endpoint %v", tcsEndpoint)
 	url := formatURL(tcsEndpoint, params.Cfg.Cluster, params.ContainerInstanceArn)
-	return startSession(url, params.Cfg.AWSRegion, params.CredentialProvider, params.AcceptInvalidCert, statsEngine, defaultPublishMetricsInterval)
+	return startSession(url, params.Cfg, params.CredentialProvider, statsEngine, defaultHeartbeatTimeout, defaultHeartbeatJitter, defaultPublishMetricsInterval, params.DeregisterInstanceEventStream)
 }
 
-func startSession(url string, region string, credentialProvider *credentials.Credentials, acceptInvalidCert bool, statsEngine stats.Engine, publishMetricsInterval time.Duration) error {
-	client := tcsclient.New(url, region, credentialProvider, acceptInvalidCert, statsEngine, publishMetricsInterval)
-
+func startSession(url string, cfg *config.Config, credentialProvider *credentials.Credentials,
+	statsEngine stats.Engine, heartbeatTimeout, heartbeatJitter, publishMetricsInterval time.Duration,
+	deregisterInstanceEventStream *eventstream.EventStream) error {
+	client := tcsclient.New(url, cfg, credentialProvider, statsEngine, publishMetricsInterval)
 	defer client.Close()
+
+	err := deregisterInstanceEventStream.Subscribe(deregisterContainerInstanceHandler, client.Disconnect)
+	if err != nil {
+		return err
+	}
+	defer deregisterInstanceEventStream.Unsubscribe(deregisterContainerInstanceHandler)
 
 	// start a timer and listens for tcs heartbeats/acks. The timer is reset when
 	// we receive a heartbeat from the server or when a publish metrics message
@@ -105,14 +113,14 @@ func startSession(url string, region string, credentialProvider *credentials.Cre
 		// Close the connection if there haven't been any messages received from backend
 		// for a long time.
 		log.Debug("TCS Connection hasn't had a heartbeat or an ack message in too long of a timeout; disconnecting")
-		client.Close()
+		client.Disconnect()
 	})
 	defer timer.Stop()
 	client.AddRequestHandler(heartbeatHandler(timer))
 	client.AddRequestHandler(ackPublishMetricHandler(timer))
-	err := client.Connect()
+	err = client.Connect()
 	if err != nil {
-		log.Error("Error connecting to TCS: " + err.Error())
+		log.Errorf("Error connecting to TCS: %v", err.Error())
 		return err
 	}
 	return client.Serve()
@@ -122,7 +130,7 @@ func startSession(url string, region string, credentialProvider *credentials.Cre
 func heartbeatHandler(timer *time.Timer) func(*ecstcs.HeartbeatMessage) {
 	return func(*ecstcs.HeartbeatMessage) {
 		log.Debug("Received HeartbeatMessage from tcs")
-		timer.Reset(utils.AddJitter(heartbeatTimeout, heartbeatJitter))
+		timer.Reset(utils.AddJitter(defaultHeartbeatTimeout, defaultHeartbeatJitter))
 	}
 }
 
@@ -131,7 +139,7 @@ func heartbeatHandler(timer *time.Timer) func(*ecstcs.HeartbeatMessage) {
 func ackPublishMetricHandler(timer *time.Timer) func(*ecstcs.AckPublishMetric) {
 	return func(*ecstcs.AckPublishMetric) {
 		log.Debug("Received AckPublishMetric from tcs")
-		timer.Reset(utils.AddJitter(heartbeatTimeout, heartbeatJitter))
+		timer.Reset(utils.AddJitter(defaultHeartbeatTimeout, defaultHeartbeatJitter))
 	}
 }
 

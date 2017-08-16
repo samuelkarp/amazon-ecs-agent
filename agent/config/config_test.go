@@ -23,8 +23,10 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/ec2"
 	"github.com/aws/amazon-ecs-agent/agent/ec2/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
+	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 
 	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestMerge(t *testing.T) {
@@ -49,7 +51,7 @@ func TestBrokenEC2Metadata(t *testing.T) {
 	os.Clearenv()
 	ctrl := gomock.NewController(t)
 	mockEc2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
-	mockEc2Metadata.EXPECT().InstanceIdentityDocument().Return(nil, errors.New("err"))
+	mockEc2Metadata.EXPECT().InstanceIdentityDocument().Return(ec2metadata.EC2InstanceIdentityDocument{}, errors.New("err"))
 
 	_, err := NewConfig(mockEc2Metadata)
 	if err == nil {
@@ -62,7 +64,7 @@ func TestBrokenEC2MetadataEndpoint(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockEc2Metadata := mock_ec2.NewMockEC2MetadataClient(ctrl)
 
-	mockEc2Metadata.EXPECT().InstanceIdentityDocument().Return(nil, errors.New("err"))
+	mockEc2Metadata.EXPECT().InstanceIdentityDocument().Return(ec2metadata.EC2InstanceIdentityDocument{}, errors.New("err"))
 	os.Setenv("AWS_DEFAULT_REGION", "us-west-2")
 
 	config, err := NewConfig(mockEc2Metadata)
@@ -88,43 +90,38 @@ func TestEnvironmentConfig(t *testing.T) {
 	os.Setenv("ECS_DISABLE_PRIVILEGED", "true")
 	os.Setenv("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION", "90s")
 	os.Setenv("ECS_ENABLE_TASK_IAM_ROLE", "true")
+	os.Setenv("ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST", "true")
+	os.Setenv("ECS_DISABLE_IMAGE_CLEANUP", "true")
+	os.Setenv("ECS_IMAGE_CLEANUP_INTERVAL", "2h")
+	os.Setenv("ECS_IMAGE_MINIMUM_CLEANUP_AGE", "30m")
+	os.Setenv("ECS_NUM_IMAGES_DELETE_PER_CYCLE", "2")
+	os.Setenv("ECS_INSTANCE_ATTRIBUTES", "{\"my_attribute\": \"testing\"}")
 
-	conf := environmentConfig()
-	if conf.Cluster != "myCluster" {
-		t.Error("Wrong value for cluster ", conf.Cluster)
-	}
-	if len(conf.ReservedPortsUDP) != 2 {
-		t.Error("Wrong length for ReservedPortsUDP")
-	}
-	if conf.ReservedPortsUDP[0] != 42 || conf.ReservedPortsUDP[1] != 99 {
-		t.Error("Wrong value for ReservedPortsUDP ", conf.ReservedPortsUDP)
-	}
-	if conf.ReservedMemory != 20 {
-		t.Error("Wrong value for ReservedMemory", conf.ReservedMemory)
-	}
+	conf, err := environmentConfig()
+	assert.Nil(t, err)
+	assert.Equal(t, "myCluster", conf.Cluster)
+	assert.Equal(t, 2, len(conf.ReservedPortsUDP))
+	assert.Contains(t, conf.ReservedPortsUDP, uint16(42))
+	assert.Contains(t, conf.ReservedPortsUDP, uint16(99))
+	assert.Equal(t, uint16(20), conf.ReservedMemory)
+
 	expectedDuration, _ := time.ParseDuration("60s")
-	if conf.DockerStopTimeout != expectedDuration {
-		t.Error("Wrong value for DockerStopTimeout", conf.DockerStopTimeout)
-	}
+	assert.Equal(t, expectedDuration, conf.DockerStopTimeout)
 
-	if !reflect.DeepEqual(conf.AvailableLoggingDrivers, []dockerclient.LoggingDriver{dockerclient.SyslogDriver}) {
-		t.Error("Wrong value for AvailableLoggingDrivers", conf.AvailableLoggingDrivers)
-	}
-	if !conf.PrivilegedDisabled {
-		t.Error("Wrong value for PrivilegedDisabled")
-	}
-	if !conf.SELinuxCapable {
-		t.Error("Wrong value for SELinuxCapable")
-	}
-	if !conf.AppArmorCapable {
-		t.Error("Wrong value for AppArmorCapable")
-	}
-	if conf.TaskCleanupWaitDuration != (90 * time.Second) {
-		t.Error("Wrong value for TaskCleanupWaitDuration")
-	}
-	if !conf.TaskIAMRoleEnabled {
-		t.Error("Wrong value for TaskIAMRoleEnabled")
-	}
+	assert.Equal(t, []dockerclient.LoggingDriver{dockerclient.SyslogDriver}, conf.AvailableLoggingDrivers)
+
+	assert.True(t, conf.PrivilegedDisabled)
+	assert.True(t, conf.SELinuxCapable, "Wrong value for SELinuxCapable")
+	assert.True(t, conf.AppArmorCapable, "Wrong value for AppArmorCapable")
+	assert.True(t, conf.TaskIAMRoleEnabled, "Wrong value for TaskIAMRoleEnabled")
+	assert.True(t, conf.TaskIAMRoleEnabledForNetworkHost, "Wrong value for TaskIAMRoleEnabledForNetworkHost")
+	assert.True(t, conf.ImageCleanupDisabled, "Wrong value for ImageCleanupDisabled")
+
+	assert.Equal(t, (30 * time.Minute), conf.MinimumImageDeletionAge)
+	assert.Equal(t, (2 * time.Hour), conf.ImageCleanupInterval)
+	assert.Equal(t, 2, conf.NumImagesToDeletePerCycle)
+	assert.Equal(t, "testing", conf.InstanceAttributes["my_attribute"])
+	assert.Equal(t, (90 * time.Second), conf.TaskCleanupWaitDuration)
 }
 
 func TestTrimWhitespace(t *testing.T) {
@@ -164,67 +161,22 @@ func TestConfigBoolean(t *testing.T) {
 	}
 }
 
-func TestConfigDefault(t *testing.T) {
-	os.Unsetenv("ECS_DISABLE_METRICS")
-	os.Unsetenv("ECS_RESERVED_PORTS")
-	os.Unsetenv("ECS_RESERVED_MEMORY")
-	os.Unsetenv("ECS_DISABLE_PRIVILEGED")
-	os.Unsetenv("ECS_AVAILABLE_LOGGING_DRIVERS")
-	os.Unsetenv("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION")
-	os.Unsetenv("ECS_ENABLE_TASK_IAM_ROLE")
-	os.Unsetenv("ECS_CONTAINER_STOP_TIMEOUT")
-	os.Unsetenv("ECS_AUDIT_LOGFILE")
-	os.Unsetenv("ECS_AUDIT_LOGFILE_DISABLED")
-	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.DockerEndpoint != "unix:///var/run/docker.sock" {
-		t.Error("Default docker endpoint set incorrectly")
-	}
-	if cfg.DataDir != "/data/" {
-		t.Error("Default datadir set incorrectly")
-	}
-	if cfg.DisableMetrics {
-		t.Errorf("Default disablemetrics set incorrectly: %v", cfg.DisableMetrics)
-	}
-	if len(cfg.ReservedPorts) != 5 {
-		t.Error("Default resered ports set incorrectly")
-	}
-	if cfg.ReservedMemory != 0 {
-		t.Errorf("Default reserved memory set incorrectly: %v", cfg.ReservedMemory)
-	}
-	expectedTimeout, _ := time.ParseDuration("30s")
-	if cfg.DockerStopTimeout != expectedTimeout {
-		t.Error("Default docker stop container timeout set incorrectly", cfg.DockerStopTimeout)
-	}
-	if cfg.PrivilegedDisabled {
-		t.Errorf("Default PrivilegedDisabled set incorrectly: %v", cfg.PrivilegedDisabled)
-	}
-	if !reflect.DeepEqual(cfg.AvailableLoggingDrivers, []dockerclient.LoggingDriver{dockerclient.JsonFileDriver}) {
-		t.Errorf("Default logging drivers set incorrectly: %v", cfg.AvailableLoggingDrivers)
-	}
-	if cfg.TaskCleanupWaitDuration != 3*time.Hour {
-		t.Errorf("Defualt task cleanup wait duration set incorrectly: %v", cfg.TaskCleanupWaitDuration)
-	}
-	if cfg.TaskIAMRoleEnabled {
-		t.Error("TaskIAMRoleEnabled set incorrectly")
-	}
-	if cfg.CredentialsAuditLogDisabled {
-		t.Error("CredentialsAuditLogDisabled set incorrectly")
-	}
-	if cfg.CredentialsAuditLogFile != defaultCredentialsAuditLogFile {
-		t.Error("CredentialsAuditLogFile default is set incorrectly")
-	}
-}
-
 func TestBadLoggingDriverSerialization(t *testing.T) {
 	os.Setenv("ECS_AVAILABLE_LOGGING_DRIVERS", "[\"malformed]")
+	defer os.Unsetenv("ECS_AVAILABLE_LOGGING_DRIVERS")
 
-	conf := environmentConfig()
+	conf, err := environmentConfig()
+	assert.NoError(t, err)
 	if len(conf.AvailableLoggingDrivers) != 0 {
 		t.Error("Wrong value for AvailableLoggingDrivers", conf.AvailableLoggingDrivers)
 	}
+}
+
+func TestBadAttributesSerialization(t *testing.T) {
+	os.Setenv("ECS_INSTANCE_ATTRIBUTES", "This is not valid JSON")
+	defer os.Unsetenv("ECS_INSTANCE_ATTRIBUTES")
+	_, err := environmentConfig()
+	assert.Error(t, err)
 }
 
 func TestInvalidLoggingDriver(t *testing.T) {
@@ -232,7 +184,7 @@ func TestInvalidLoggingDriver(t *testing.T) {
 	conf.AWSRegion = "us-west-2"
 	conf.AvailableLoggingDrivers = []dockerclient.LoggingDriver{"invalid-logging-driver"}
 
-	err := conf.validate()
+	err := conf.validateAndOverrideBounds()
 	if err == nil {
 		t.Error("Should be error with invalid-logging-driver")
 	}
@@ -240,7 +192,10 @@ func TestInvalidLoggingDriver(t *testing.T) {
 
 func TestInvalidFormatDockerStopTimeout(t *testing.T) {
 	os.Setenv("ECS_CONTAINER_STOP_TIMEOUT", "invalid")
-	conf := environmentConfig()
+	conf, err := environmentConfig()
+	if err != nil {
+		t.Error("environmentConfig() returned unexpected error %v", err)
+	}
 	if conf.DockerStopTimeout != 0 {
 		t.Error("Wrong value for DockerStopTimeout", conf.DockerStopTimeout)
 	}
@@ -248,17 +203,16 @@ func TestInvalidFormatDockerStopTimeout(t *testing.T) {
 
 func TestInvalideValueDockerStopTimeout(t *testing.T) {
 	os.Setenv("ECS_CONTAINER_STOP_TIMEOUT", "-10s")
-	conf := environmentConfig()
-	if conf.DockerStopTimeout != 0 {
-		t.Error("Wrong value for DockerStopTimeout", conf.DockerStopTimeout)
-	}
+	conf, err := environmentConfig()
+	assert.NoError(t, err)
+	assert.Zero(t, conf.DockerStopTimeout)
 }
 
 func TestInvalideDockerStopTimeout(t *testing.T) {
 	conf := DefaultConfig()
 	conf.DockerStopTimeout = -1 * time.Second
 
-	err := conf.validate()
+	err := conf.validateAndOverrideBounds()
 	if err == nil {
 		t.Error("Should be error with negative DockerStopTimeout")
 	}
@@ -364,6 +318,18 @@ func TestTaskIAMRoleEnabled(t *testing.T) {
 	}
 }
 
+func TestTaskIAMRoleForHostNetworkEnabled(t *testing.T) {
+	os.Setenv("ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST", "true")
+	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !cfg.TaskIAMRoleEnabledForNetworkHost {
+		t.Errorf("Wrong value for TaskIAMRoleEnabledForNetworkHost: %v", cfg.TaskIAMRoleEnabledForNetworkHost)
+	}
+}
+
 func TestCredentialsAuditLogFile(t *testing.T) {
 	dummyLocation := "/foo/bar.log"
 	os.Setenv("ECS_AUDIT_LOGFILE", dummyLocation)
@@ -386,5 +352,29 @@ func TestCredentialsAuditLogDisabled(t *testing.T) {
 
 	if !cfg.CredentialsAuditLogDisabled {
 		t.Errorf("Wrong value for CredentialsAuditLogDisabled: %v", cfg.CredentialsAuditLogDisabled)
+	}
+}
+
+func TestImageCleanupMinimumInterval(t *testing.T) {
+	os.Setenv("ECS_IMAGE_CLEANUP_INTERVAL", "1m")
+	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.ImageCleanupInterval != DefaultImageCleanupTimeInterval {
+		t.Errorf("Wrong value for ImageCleanupInterval: %v", cfg.ImageCleanupInterval)
+	}
+}
+
+func TestImageCleanupMinimumNumImagesToDeletePerCycle(t *testing.T) {
+	os.Setenv("ECS_NUM_IMAGES_DELETE_PER_CYCLE", "-1")
+	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.NumImagesToDeletePerCycle != DefaultNumImagesToDeletePerCycle {
+		t.Errorf("Wrong value for NumImagesToDeletePerCycle: %v", cfg.NumImagesToDeletePerCycle)
 	}
 }

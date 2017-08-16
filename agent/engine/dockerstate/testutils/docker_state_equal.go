@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -21,7 +21,7 @@ import api_testutils "github.com/aws/amazon-ecs-agent/agent/api/testutils"
 
 // DockerStatesEqual determines if the two given dockerstates are equal, for
 // equal meaning they have the same tasks and their tasks are equal
-func DockerStatesEqual(lhs, rhs *dockerstate.DockerTaskEngineState) bool {
+func DockerStatesEqual(lhs, rhs dockerstate.TaskEngineState) bool {
 	// Simple equality check; just verify that all tasks are equal
 	lhsTasks := lhs.AllTasks()
 	rhsTasks := rhs.AllTasks()

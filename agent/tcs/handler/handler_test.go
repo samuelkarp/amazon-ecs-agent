@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -19,16 +19,22 @@ import (
 	"math/rand"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/api/mocks"
+	"github.com/aws/amazon-ecs-agent/agent/config"
+	"github.com/aws/amazon-ecs-agent/agent/eventstream"
 	"github.com/aws/amazon-ecs-agent/agent/tcs/client"
 	"github.com/aws/amazon-ecs-agent/agent/tcs/model/ecstcs"
 	"github.com/aws/amazon-ecs-agent/agent/wsclient"
-	"github.com/aws/amazon-ecs-agent/agent/wsclient/mock/utils"
+	wsmock "github.com/aws/amazon-ecs-agent/agent/wsclient/mock/utils"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/golang/mock/gomock"
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
+	"golang.org/x/net/context"
 )
 
 const (
@@ -41,6 +47,11 @@ const (
 )
 
 type mockStatsEngine struct{}
+
+var testCfg = &config.Config{
+	AcceptInsecureCert: true,
+	AWSRegion:          "us-east-1",
+}
 
 func (engine *mockStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, []*ecstcs.TaskMetric, error) {
 	req := createPublishMetricsRequest()
@@ -70,28 +81,48 @@ func TestFormatURL(t *testing.T) {
 
 func TestStartSession(t *testing.T) {
 	// Start test server.
-	closeWS := make(chan bool)
-	server, serverChan, requestChan, serverErr, err := mockwsutils.StartMockServer(t, closeWS)
+	closeWS := make(chan []byte)
+	server, serverChan, requestChan, serverErr, err := wsmock.GetMockServer(t, closeWS)
+	server.StartTLS()
 	defer server.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
+	wait := &sync.WaitGroup{}
+	ctx, cancel := context.WithCancel(context.Background())
+	wait.Add(1)
 	go func() {
-		t.Error(<-serverErr)
+		select {
+		case sErr := <-serverErr:
+			t.Error(sErr)
+		case <-ctx.Done():
+		}
+		wait.Done()
 	}()
 	defer func() {
-		closeWS <- true
+		closeSocket(closeWS)
 		close(serverChan)
 	}()
 
+	deregisterInstanceEventStream := eventstream.NewEventStream("Deregister_Instance", context.Background())
 	// Start a session with the test server.
-	go startSession(server.URL, "us-east-1", credentials.AnonymousCredentials, true, &mockStatsEngine{}, testPublishMetricsInterval)
+	go startSession(server.URL, testCfg, credentials.AnonymousCredentials, &mockStatsEngine{}, defaultHeartbeatTimeout, defaultHeartbeatJitter, testPublishMetricsInterval, deregisterInstanceEventStream)
 
 	// startSession internally starts publishing metrics from the mockStatsEngine object.
 	time.Sleep(testPublishMetricsInterval)
 
 	// Read request channel to get the metric data published to the server.
 	request := <-requestChan
+	cancel()
+	wait.Wait()
+
+	go func() {
+		for {
+			select {
+			case <-requestChan:
+			}
+		}
+	}()
 
 	// Decode and verify the metric data.
 	payload, err := getPayloadFromRequest(request)
@@ -100,7 +131,7 @@ func TestStartSession(t *testing.T) {
 	}
 
 	// Decode and verify the metric data.
-	_, responseType, err := wsclient.DecodeData([]byte(payload), &tcsclient.TcsDecoder{})
+	_, responseType, err := wsclient.DecodeData([]byte(payload), tcsclient.NewTCSDecoder())
 	if err != nil {
 		t.Fatal("error decoding data: ", err)
 	}
@@ -109,29 +140,35 @@ func TestStartSession(t *testing.T) {
 	}
 }
 
-func TestSessionConenctionClosedByRemote(t *testing.T) {
+func TestSessionConnectionClosedByRemote(t *testing.T) {
 	// Start test server.
-	closeWS := make(chan bool)
-	server, serverChan, _, serverErr, err := mockwsutils.StartMockServer(t, closeWS)
+	closeWS := make(chan []byte)
+	server, serverChan, _, serverErr, err := wsmock.GetMockServer(t, closeWS)
+	server.StartTLS()
 	defer server.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
 	go func() {
 		serr := <-serverErr
-		if serr != io.EOF {
+		if !websocket.IsCloseError(serr, websocket.CloseNormalClosure) {
 			t.Error(serr)
 		}
 	}()
 	sleepBeforeClose := 10 * time.Millisecond
 	go func() {
 		time.Sleep(sleepBeforeClose)
-		closeWS <- true
+		closeSocket(closeWS)
 		close(serverChan)
 	}()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	deregisterInstanceEventStream := eventstream.NewEventStream("Deregister_Instance", ctx)
+	deregisterInstanceEventStream.StartListening()
+	defer cancel()
+
 	// Start a session with the test server.
-	err = startSession(server.URL, "us-east-1", credentials.AnonymousCredentials, true, &mockStatsEngine{}, testPublishMetricsInterval)
+	err = startSession(server.URL, testCfg, credentials.AnonymousCredentials, &mockStatsEngine{}, defaultHeartbeatTimeout, defaultHeartbeatJitter, testPublishMetricsInterval, deregisterInstanceEventStream)
 
 	if err == nil {
 		t.Error("Expected io.EOF on closed connection")
@@ -141,6 +178,40 @@ func TestSessionConenctionClosedByRemote(t *testing.T) {
 	}
 }
 
+// TestConnectionInactiveTimeout tests the tcs client reconnect when it loses network
+// connection or it's inactive for too long
+func TestConnectionInactiveTimeout(t *testing.T) {
+	// Start test server.
+	closeWS := make(chan []byte)
+	server, _, requestChan, serverErr, err := wsmock.GetMockServer(t, closeWS)
+	server.StartTLS()
+	defer server.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		for {
+			select {
+			case <-requestChan:
+			}
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	deregisterInstanceEventStream := eventstream.NewEventStream("Deregister_Instance", ctx)
+	deregisterInstanceEventStream.StartListening()
+	defer cancel()
+	// Start a session with the test server.
+	err = startSession(server.URL, testCfg, credentials.AnonymousCredentials, &mockStatsEngine{}, 50*time.Millisecond, 100*time.Millisecond, testPublishMetricsInterval, deregisterInstanceEventStream)
+	// if we are not blocked here, then the test pass as it will reconnect in StartSession
+	assert.Error(t, err, "Close the connection should cause the tcs client return error")
+
+	assert.True(t, websocket.IsCloseError(<-serverErr, websocket.CloseAbnormalClosure), "Read from closed connection should produce an io.EOF error")
+
+	closeSocket(closeWS)
+}
+
 func TestDiscoverEndpointAndStartSession(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -148,7 +219,7 @@ func TestDiscoverEndpointAndStartSession(t *testing.T) {
 	mockEcs := mock_api.NewMockECSClient(ctrl)
 	mockEcs.EXPECT().DiscoverTelemetryEndpoint(gomock.Any()).Return("", errors.New("error"))
 
-	err := startTelemetrySession(TelemetrySessionParams{EcsClient: mockEcs}, nil)
+	err := startTelemetrySession(TelemetrySessionParams{ECSClient: mockEcs}, nil)
 	if err == nil {
 		t.Error("Expected error from startTelemetrySession when DiscoverTelemetryEndpoint returns error")
 	}
@@ -161,6 +232,13 @@ func getPayloadFromRequest(request string) (string, error) {
 	}
 
 	return "", errors.New("Could not get payload")
+}
+
+// closeSocket tells the server to send a close frame. This lets us test
+// what happens if the connection is closed by the remote server.
+func closeSocket(ws chan<- []byte) {
+	ws <- websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
+	close(ws)
 }
 
 func createPublishMetricsRequest() *ecstcs.PublishMetricsRequest {
@@ -183,9 +261,9 @@ func createPublishMetricsRequest() *ecstcs.PublishMetricsRequest {
 			MessageId:         &messageId,
 		},
 		TaskMetrics: []*ecstcs.TaskMetric{
-			&ecstcs.TaskMetric{
+			{
 				ContainerMetrics: []*ecstcs.ContainerMetric{
-					&ecstcs.ContainerMetric{
+					{
 						CpuStatsSet: &ecstcs.CWStatsSet{
 							Max:         &fval,
 							Min:         &fval,

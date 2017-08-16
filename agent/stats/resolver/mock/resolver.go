@@ -1,4 +1,4 @@
-// Copyright 2015-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2015-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -40,6 +40,17 @@ func NewMockContainerMetadataResolver(ctrl *gomock.Controller) *MockContainerMet
 
 func (_m *MockContainerMetadataResolver) EXPECT() *_MockContainerMetadataResolverRecorder {
 	return _m.recorder
+}
+
+func (_m *MockContainerMetadataResolver) ResolveContainer(_param0 string) (*api.DockerContainer, error) {
+	ret := _m.ctrl.Call(_m, "ResolveContainer", _param0)
+	ret0, _ := ret[0].(*api.DockerContainer)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+func (_mr *_MockContainerMetadataResolverRecorder) ResolveContainer(arg0 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "ResolveContainer", arg0)
 }
 
 func (_m *MockContainerMetadataResolver) ResolveTask(_param0 string) (*api.Task, error) {

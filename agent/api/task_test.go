@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -25,6 +25,7 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/utils/ttime"
 	docker "github.com/fsouza/go-dockerclient"
 	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
 )
 
 func strptr(s string) *string { return &s }
@@ -32,7 +33,7 @@ func strptr(s string) *string { return &s }
 func dockerMap(task *Task) map[string]*DockerContainer {
 	m := make(map[string]*DockerContainer)
 	for _, c := range task.Containers {
-		m[c.Name] = &DockerContainer{DockerId: "dockerid-" + c.Name, DockerName: "dockername-" + c.Name, Container: c}
+		m[c.Name] = &DockerContainer{DockerID: "dockerid-" + c.Name, DockerName: "dockername-" + c.Name, Container: c}
 	}
 	return m
 }
@@ -40,9 +41,9 @@ func dockerMap(task *Task) map[string]*DockerContainer {
 func TestTaskOverridden(t *testing.T) {
 	testTask := &Task{
 		Containers: []*Container{
-			&Container{
+			{
 				Name:  "c1",
-				Ports: []PortBinding{PortBinding{10, 10, "", TransportProtocolTCP}},
+				Ports: []PortBinding{{10, 10, "", TransportProtocolTCP}},
 			},
 		},
 	}
@@ -56,9 +57,9 @@ func TestTaskOverridden(t *testing.T) {
 func TestDockerConfigPortBinding(t *testing.T) {
 	testTask := &Task{
 		Containers: []*Container{
-			&Container{
+			{
 				Name:  "c1",
-				Ports: []PortBinding{PortBinding{10, 10, "", TransportProtocolTCP}, PortBinding{20, 20, "", TransportProtocolUDP}},
+				Ports: []PortBinding{{10, 10, "", TransportProtocolTCP}, {20, 20, "", TransportProtocolUDP}},
 			},
 		},
 	}
@@ -81,9 +82,9 @@ func TestDockerConfigPortBinding(t *testing.T) {
 func TestDockerConfigCPUShareZero(t *testing.T) {
 	testTask := &Task{
 		Containers: []*Container{
-			&Container{
+			{
 				Name: "c1",
-				Cpu:  0,
+				CPU:  0,
 			},
 		},
 	}
@@ -101,9 +102,9 @@ func TestDockerConfigCPUShareZero(t *testing.T) {
 func TestDockerConfigCPUShareMinimum(t *testing.T) {
 	testTask := &Task{
 		Containers: []*Container{
-			&Container{
+			{
 				Name: "c1",
-				Cpu:  1,
+				CPU:  1,
 			},
 		},
 	}
@@ -121,9 +122,9 @@ func TestDockerConfigCPUShareMinimum(t *testing.T) {
 func TestDockerConfigCPUShareUnchanged(t *testing.T) {
 	testTask := &Task{
 		Containers: []*Container{
-			&Container{
+			{
 				Name: "c1",
-				Cpu:  100,
+				CPU:  100,
 			},
 		},
 	}
@@ -141,9 +142,9 @@ func TestDockerConfigCPUShareUnchanged(t *testing.T) {
 func TestDockerHostConfigPortBinding(t *testing.T) {
 	testTask := &Task{
 		Containers: []*Container{
-			&Container{
+			{
 				Name:  "c1",
-				Ports: []PortBinding{PortBinding{10, 10, "", TransportProtocolTCP}, PortBinding{20, 20, "", TransportProtocolUDP}},
+				Ports: []PortBinding{{10, 10, "", TransportProtocolTCP}, {20, 20, "", TransportProtocolUDP}},
 			},
 		},
 	}
@@ -154,42 +155,27 @@ func TestDockerHostConfigPortBinding(t *testing.T) {
 	}
 
 	bindings, ok := config.PortBindings["10/tcp"]
-	if !ok {
-		t.Fatal("Could not get port bindings")
-	}
-	if len(bindings) != 1 {
-		t.Fatal("Wrong number of bindings")
-	}
-	if bindings[0].HostPort != "10" {
-		t.Error("Wrong hostport")
-	}
-	if bindings[0].HostIP != "0.0.0.0" {
-		t.Error("Wrong hostIP")
-	}
+	assert.True(t, ok, "Could not get port bindings")
+	assert.Equal(t, 1, len(bindings), "Wrong number of bindings")
+	assert.Equal(t, "10", bindings[0].HostPort, "Wrong hostport")
+	assert.Equal(t, portBindingHostIP, bindings[0].HostIP, "Wrong hostIP")
+
 	bindings, ok = config.PortBindings["20/udp"]
-	if !ok {
-		t.Fatal("Could not get port bindings")
-	}
-	if len(bindings) != 1 {
-		t.Fatal("Wrong number of bindings")
-	}
-	if bindings[0].HostPort != "20" {
-		t.Error("Wrong hostport")
-	}
-	if bindings[0].HostIP != "0.0.0.0" {
-		t.Error("Wrong hostIP")
-	}
+	assert.True(t, ok, "Could not get port bindings")
+	assert.Equal(t, 1, len(bindings), "Wrong number of bindings")
+	assert.Equal(t, "20", bindings[0].HostPort, "Wrong hostport")
+	assert.Equal(t, portBindingHostIP, bindings[0].HostIP, "Wrong hostIP")
 }
 
 func TestDockerHostConfigVolumesFrom(t *testing.T) {
 	testTask := &Task{
 		Containers: []*Container{
-			&Container{
+			{
 				Name: "c1",
 			},
-			&Container{
+			{
 				Name:        "c2",
-				VolumesFrom: []VolumeFrom{VolumeFrom{SourceContainer: "c1"}},
+				VolumesFrom: []VolumeFrom{{SourceContainer: "c1"}},
 			},
 		},
 	}
@@ -215,7 +201,7 @@ func TestDockerHostConfigRawConfig(t *testing.T) {
 			Type:   "foo",
 			Config: map[string]string{"foo": "bar"},
 		},
-		Ulimits: []docker.ULimit{docker.ULimit{Name: "ulimit name", Soft: 10, Hard: 100}},
+		Ulimits: []docker.ULimit{{Name: "ulimit name", Soft: 10, Hard: 100}},
 	}
 
 	rawHostConfig, err := json.Marshal(&rawHostConfigInput)
@@ -228,7 +214,7 @@ func TestDockerHostConfigRawConfig(t *testing.T) {
 		Family:  "myFamily",
 		Version: "1",
 		Containers: []*Container{
-			&Container{
+			{
 				Name: "c1",
 				DockerConfig: DockerConfig{
 					HostConfig: strptr(string(rawHostConfig)),
@@ -268,17 +254,17 @@ func TestDockerHostConfigRawConfigMerging(t *testing.T) {
 		Family:  "myFamily",
 		Version: "1",
 		Containers: []*Container{
-			&Container{
+			{
 				Name:        "c1",
 				Image:       "image",
-				Cpu:         50,
+				CPU:         50,
 				Memory:      100,
-				VolumesFrom: []VolumeFrom{VolumeFrom{SourceContainer: "c2"}},
+				VolumesFrom: []VolumeFrom{{SourceContainer: "c2"}},
 				DockerConfig: DockerConfig{
 					HostConfig: strptr(string(rawHostConfig)),
 				},
 			},
-			&Container{
+			{
 				Name: "c2",
 			},
 		},
@@ -305,7 +291,7 @@ func TestBadDockerHostConfigRawConfig(t *testing.T) {
 			Family:  "myFamily",
 			Version: "1",
 			Containers: []*Container{
-				&Container{
+				{
 					Name: "c1",
 					DockerConfig: DockerConfig{
 						HostConfig: strptr(badHostConfig),
@@ -317,66 +303,6 @@ func TestBadDockerHostConfigRawConfig(t *testing.T) {
 		if err == nil {
 			t.Fatal("Expected error, was none for: " + badHostConfig)
 		}
-	}
-}
-
-func TestDockerConfigLabels(t *testing.T) {
-	testTask := &Task{
-		Arn:     "arn:aws:ecs:us-east-1:012345678910:task/c09f0188-7f87-4b0f-bfc3-16296622b6fe",
-		Family:  "myFamily",
-		Version: "1",
-		Containers: []*Container{
-			&Container{
-				Name: "c1",
-			},
-		},
-	}
-
-	config, err := testTask.DockerConfig(testTask.Containers[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := map[string]string{
-		"com.amazonaws.ecs.task-arn":                "arn:aws:ecs:us-east-1:012345678910:task/c09f0188-7f87-4b0f-bfc3-16296622b6fe",
-		"com.amazonaws.ecs.container-name":          "c1",
-		"com.amazonaws.ecs.task-definition-family":  "myFamily",
-		"com.amazonaws.ecs.task-definition-version": "1",
-	}
-	if !reflect.DeepEqual(config.Labels, expected) {
-		t.Fatal("Expected default ecs labels to be set, was: ", config.Labels)
-	}
-}
-
-func TestDockerConfigMergesLabels(t *testing.T) {
-	testTask := &Task{
-		Arn:     "arn:aws:ecs:us-east-1:012345678910:task/c09f0188-7f87-4b0f-bfc3-16296622b6fe",
-		Family:  "myFamily",
-		Version: "1",
-		Containers: []*Container{
-			&Container{
-				Name: "c1",
-				DockerConfig: DockerConfig{
-					Config: strptr(`{"Labels":{"key":"value"}}`),
-				},
-			},
-		},
-	}
-
-	config, err := testTask.DockerConfig(testTask.Containers[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := map[string]string{
-		"com.amazonaws.ecs.task-arn":                "arn:aws:ecs:us-east-1:012345678910:task/c09f0188-7f87-4b0f-bfc3-16296622b6fe",
-		"com.amazonaws.ecs.container-name":          "c1",
-		"com.amazonaws.ecs.task-definition-family":  "myFamily",
-		"com.amazonaws.ecs.task-definition-version": "1",
-		"key": "value",
-	}
-	if !reflect.DeepEqual(config.Labels, expected) {
-		t.Fatal("Expected default ecs labels to be set, was: ", config.Labels)
 	}
 }
 
@@ -400,7 +326,7 @@ func TestDockerConfigRawConfig(t *testing.T) {
 		Family:  "myFamily",
 		Version: "1",
 		Containers: []*Container{
-			&Container{
+			{
 				Name: "c1",
 				DockerConfig: DockerConfig{
 					Config: strptr(string(rawConfig)),
@@ -431,7 +357,7 @@ func TestDockerConfigRawConfigNilLabel(t *testing.T) {
 		Family:  "myFamily",
 		Version: "1",
 		Containers: []*Container{
-			&Container{
+			{
 				Name: "c1",
 				DockerConfig: DockerConfig{
 					Config: strptr(string(rawConfig)),
@@ -465,10 +391,10 @@ func TestDockerConfigRawConfigMerging(t *testing.T) {
 		Family:  "myFamily",
 		Version: "1",
 		Containers: []*Container{
-			&Container{
+			{
 				Name:   "c1",
 				Image:  "image",
-				Cpu:    50,
+				CPU:    50,
 				Memory: 100,
 				DockerConfig: DockerConfig{
 					Config: strptr(string(rawConfig)),
@@ -499,7 +425,7 @@ func TestBadDockerConfigRawConfig(t *testing.T) {
 			Family:  "myFamily",
 			Version: "1",
 			Containers: []*Container{
-				&Container{
+				{
 					Name: "c1",
 					DockerConfig: DockerConfig{
 						Config: strptr(badConfig),
@@ -519,21 +445,24 @@ func TestGetCredentialsEndpointWhenCredentialsAreSet(t *testing.T) {
 	defer ctrl.Finish()
 	credentialsManager := mock_credentials.NewMockManager(ctrl)
 
-	credentialsIdInTask := "credsid"
+	credentialsIDInTask := "credsid"
 	task := Task{
 		Containers: []*Container{
-			&Container{
+			{
 				Name:        "c1",
 				Environment: make(map[string]string),
 			},
-			&Container{
+			{
 				Name:        "c2",
 				Environment: make(map[string]string),
 			}},
-		credentialsId: credentialsIdInTask,
+		credentialsID: credentialsIDInTask,
 	}
 
-	credentialsManager.EXPECT().GetCredentials(credentialsIdInTask).Return(&credentials.IAMRoleCredentials{CredentialsId: "credsid"}, true)
+	taskCredentials := credentials.TaskIAMRoleCredentials{
+		IAMRoleCredentials: credentials.IAMRoleCredentials{CredentialsID: "credsid"},
+	}
+	credentialsManager.EXPECT().GetTaskCredentials(credentialsIDInTask).Return(taskCredentials, true)
 	task.initializeCredentialsEndpoint(credentialsManager)
 
 	// Test if all containers in the task have the environment variable for
@@ -554,11 +483,11 @@ func TestGetCredentialsEndpointWhenCredentialsAreNotSet(t *testing.T) {
 
 	task := Task{
 		Containers: []*Container{
-			&Container{
+			{
 				Name:        "c1",
 				Environment: make(map[string]string),
 			},
-			&Container{
+			{
 				Name:        "c2",
 				Environment: make(map[string]string),
 			}},
@@ -575,10 +504,70 @@ func TestGetCredentialsEndpointWhenCredentialsAreNotSet(t *testing.T) {
 	}
 }
 
-// TODO: UT for PostUnmarshalTask, initializeEmptyVolumes etc
+// TODO: UT for PostUnmarshalTask, etc
+
+func TestPostUnmarshalTaskWithEmptyVolumes(t *testing.T) {
+	// Constants used here are defined in task_unix_test.go and task_windows_test.go
+	taskFromACS := ecsacs.Task{
+		Arn:           strptr("myArn"),
+		DesiredStatus: strptr("RUNNING"),
+		Family:        strptr("myFamily"),
+		Version:       strptr("1"),
+		Containers: []*ecsacs.Container{
+			{
+				Name: strptr("myName1"),
+				MountPoints: []*ecsacs.MountPoint{
+					{
+						ContainerPath: strptr(emptyVolumeContainerPath1),
+						SourceVolume:  strptr(emptyVolumeName1),
+					},
+				},
+			},
+			{
+				Name: strptr("myName2"),
+				MountPoints: []*ecsacs.MountPoint{
+					{
+						ContainerPath: strptr(emptyVolumeContainerPath2),
+						SourceVolume:  strptr(emptyVolumeName2),
+					},
+				},
+			},
+		},
+		Volumes: []*ecsacs.Volume{
+			{
+				Name: strptr(emptyVolumeName1),
+				Host: &ecsacs.HostVolumeProperties{},
+			},
+			{
+				Name: strptr(emptyVolumeName2),
+				Host: &ecsacs.HostVolumeProperties{},
+			},
+		},
+	}
+	seqNum := int64(42)
+	task, err := TaskFromACS(&taskFromACS, &ecsacs.PayloadMessage{SeqNum: &seqNum})
+	assert.Nil(t, err, "Should be able to handle acs task")
+	assert.Equal(t, 2, len(task.Containers)) // before PostUnmarshalTask
+	task.PostUnmarshalTask(nil)
+
+	assert.Equal(t, 3, len(task.Containers), "Should include new container for volumes")
+	emptyContainer, ok := task.ContainerByName(emptyHostVolumeName)
+	assert.True(t, ok, "Should find empty volume container")
+	assert.Equal(t, 2, len(emptyContainer.MountPoints), "Should have two mount points")
+	assert.Equal(t, []MountPoint{
+		{
+			SourceVolume:  emptyVolumeName1,
+			ContainerPath: expectedEmptyVolumeGeneratedPath1,
+		}, {
+			SourceVolume:  emptyVolumeName2,
+			ContainerPath: expectedEmptyVolumeGeneratedPath2,
+		},
+	}, emptyContainer.MountPoints)
+
+}
 
 func TestTaskFromACS(t *testing.T) {
-	test_time := ttime.Now().Truncate(1 * time.Second).Format(time.RFC3339)
+	testTime := ttime.Now().Truncate(1 * time.Second).Format(time.RFC3339)
 
 	intptr := func(i int64) *int64 {
 		return &i
@@ -594,7 +583,7 @@ func TestTaskFromACS(t *testing.T) {
 		Family:        strptr("myFamily"),
 		Version:       strptr("1"),
 		Containers: []*ecsacs.Container{
-			&ecsacs.Container{
+			{
 				Name:        strptr("myName"),
 				Cpu:         intptr(10),
 				Command:     []*string{strptr("command"), strptr("command2")},
@@ -605,7 +594,7 @@ func TestTaskFromACS(t *testing.T) {
 				Links:       []*string{strptr("link1"), strptr("link2")},
 				Memory:      intptr(100),
 				MountPoints: []*ecsacs.MountPoint{
-					&ecsacs.MountPoint{
+					{
 						ContainerPath: strptr("/container/path"),
 						ReadOnly:      boolptr(true),
 						SourceVolume:  strptr("sourceVolume"),
@@ -613,14 +602,14 @@ func TestTaskFromACS(t *testing.T) {
 				},
 				Overrides: strptr(`{"command":["a","b","c"]}`),
 				PortMappings: []*ecsacs.PortMapping{
-					&ecsacs.PortMapping{
+					{
 						HostPort:      intptr(800),
 						ContainerPort: intptr(900),
 						Protocol:      strptr("udp"),
 					},
 				},
 				VolumesFrom: []*ecsacs.VolumeFrom{
-					&ecsacs.VolumeFrom{
+					{
 						ReadOnly:        boolptr(true),
 						SourceContainer: strptr("volumeLink"),
 					},
@@ -633,7 +622,7 @@ func TestTaskFromACS(t *testing.T) {
 			},
 		},
 		Volumes: []*ecsacs.Volume{
-			&ecsacs.Volume{
+			{
 				Name: strptr("volName"),
 				Host: &ecsacs.HostVolumeProperties{
 					SourcePath: strptr("/host/path"),
@@ -643,19 +632,19 @@ func TestTaskFromACS(t *testing.T) {
 		RoleCredentials: &ecsacs.IAMRoleCredentials{
 			CredentialsId:   strptr("credsId"),
 			AccessKeyId:     strptr("keyId"),
-			Expiration:      strptr(test_time),
+			Expiration:      strptr(testTime),
 			RoleArn:         strptr("roleArn"),
 			SecretAccessKey: strptr("OhhSecret"),
 			SessionToken:    strptr("sessionToken"),
 		},
 	}
 	expectedTask := &Task{
-		Arn:           "myArn",
-		DesiredStatus: TaskRunning,
-		Family:        "myFamily",
-		Version:       "1",
+		Arn:                 "myArn",
+		DesiredStatusUnsafe: TaskRunning,
+		Family:              "myFamily",
+		Version:             "1",
 		Containers: []*Container{
-			&Container{
+			{
 				Name:        "myName",
 				Image:       "image:tag",
 				Command:     []string{"command", "command2"},
@@ -663,10 +652,10 @@ func TestTaskFromACS(t *testing.T) {
 				EntryPoint:  &[]string{"sh", "-c"},
 				Essential:   true,
 				Environment: map[string]string{"key": "value"},
-				Cpu:         10,
+				CPU:         10,
 				Memory:      100,
 				MountPoints: []MountPoint{
-					MountPoint{
+					{
 						ContainerPath: "/container/path",
 						ReadOnly:      true,
 						SourceVolume:  "sourceVolume",
@@ -676,14 +665,14 @@ func TestTaskFromACS(t *testing.T) {
 					Command: &[]string{"a", "b", "c"},
 				},
 				Ports: []PortBinding{
-					PortBinding{
+					{
 						HostPort:      800,
 						ContainerPort: 900,
 						Protocol:      TransportProtocolUDP,
 					},
 				},
 				VolumesFrom: []VolumeFrom{
-					VolumeFrom{
+					{
 						ReadOnly:        true,
 						SourceContainer: "volumeLink",
 					},
@@ -696,7 +685,7 @@ func TestTaskFromACS(t *testing.T) {
 			},
 		},
 		Volumes: []TaskVolume{
-			TaskVolume{
+			{
 				Name: "volName",
 				Volume: &FSHostVolume{
 					FSSourcePath: "/host/path",
@@ -723,6 +712,78 @@ func TestTaskFromACS(t *testing.T) {
 	if !reflect.DeepEqual(task.StopSequenceNumber, expectedTask.StopSequenceNumber) {
 		t.Fatal("StopSequenceNumber should be equal")
 	}
+}
+
+func TestTaskUpdateKnownStatusHappyPath(t *testing.T) {
+	testTask := &Task{
+		KnownStatusUnsafe: TaskStatusNone,
+		Containers: []*Container{
+			{
+				KnownStatusUnsafe: ContainerCreated,
+			},
+			{
+				KnownStatusUnsafe: ContainerStopped,
+				Essential:         true,
+			},
+			{
+				KnownStatusUnsafe: ContainerRunning,
+			},
+		},
+	}
+
+	newStatus := testTask.updateTaskKnownStatus()
+	assert.Equal(t, TaskCreated, newStatus, "task status should depend on the earlist container status")
+	assert.Equal(t, TaskCreated, testTask.GetKnownStatus(), "task status should depend on the earlist container status")
+}
+
+// TestTaskUpdateKnownStatusNotChangeToRunningWithEssentialContainerStopped tests when there is one essential
+// container is stopped while the other containers are running, the task status shouldn't be changed to running
+func TestTaskUpdateKnownStatusNotChangeToRunningWithEssentialContainerStopped(t *testing.T) {
+	testTask := &Task{
+		KnownStatusUnsafe: TaskCreated,
+		Containers: []*Container{
+			{
+				KnownStatusUnsafe: ContainerRunning,
+				Essential:         true,
+			},
+			{
+				KnownStatusUnsafe: ContainerStopped,
+				Essential:         true,
+			},
+			{
+				KnownStatusUnsafe: ContainerRunning,
+			},
+		},
+	}
+
+	newStatus := testTask.updateTaskKnownStatus()
+	assert.Equal(t, TaskStatusNone, newStatus, "task status should not move to running if essential container is stopped")
+	assert.Equal(t, TaskCreated, testTask.GetKnownStatus(), "task status should not move to running if essential container is stopped")
+}
+
+// TestTaskUpdateKnownStatusToPendingWithEssentialContainerStopped tests when there is one essential container
+// is stopped while other container status are prior to Running, the task status should be updated.
+func TestTaskUpdateKnownStatusToPendingWithEssentialContainerStopped(t *testing.T) {
+	testTask := &Task{
+		KnownStatusUnsafe: TaskStatusNone,
+		Containers: []*Container{
+			{
+				KnownStatusUnsafe: ContainerCreated,
+				Essential:         true,
+			},
+			{
+				KnownStatusUnsafe: ContainerStopped,
+				Essential:         true,
+			},
+			{
+				KnownStatusUnsafe: ContainerCreated,
+			},
+		},
+	}
+
+	newStatus := testTask.updateTaskKnownStatus()
+	assert.Equal(t, TaskCreated, newStatus, "task status should be updated when essential containers are stopped while not all the other containers are running")
+	assert.Equal(t, TaskCreated, testTask.GetKnownStatus(), "task status should be updated when essential containers are stopped while not all the other containers are running")
 }
 
 func assertSetStructFieldsEqual(t *testing.T, expected, actual interface{}) {

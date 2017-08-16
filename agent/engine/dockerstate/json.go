@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -18,14 +18,16 @@ import (
 	"errors"
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
+	"github.com/aws/amazon-ecs-agent/agent/engine/image"
 )
 
 // These bits of information should be enough to reconstruct the entire
 // DockerTaskEngine state
 type savedState struct {
 	Tasks         []*api.Task
-	IdToContainer map[string]*api.DockerContainer // DockerId -> api.DockerContainer
-	IdToTask      map[string]string               // DockerId -> taskarn
+	IdToContainer map[string]*api.DockerContainer `json:"IdToContainer"` // DockerId -> api.DockerContainer
+	IdToTask      map[string]string               `json:"IdToTask"`      // DockerId -> taskarn
+	ImageStates   []*image.ImageState
 }
 
 func (state *DockerTaskEngineState) MarshalJSON() ([]byte, error) {
@@ -33,9 +35,10 @@ func (state *DockerTaskEngineState) MarshalJSON() ([]byte, error) {
 	state.lock.RLock()
 	defer state.lock.RUnlock()
 	toSave = savedState{
-		Tasks:         state.AllTasks(),
+		Tasks:         state.allTasks(),
 		IdToContainer: state.idToContainer,
 		IdToTask:      state.idToTask,
+		ImageStates:   state.allImageStates(),
 	}
 	return json.Marshal(toSave)
 }
@@ -50,10 +53,14 @@ func (state *DockerTaskEngineState) UnmarshalJSON(data []byte) error {
 	// reset it by just creating a new one and swapping shortly.
 	// This also means we don't have to lock for the remainder of this function
 	// because we are the only ones with a reference to clean
-	clean := NewDockerTaskEngineState()
+	clean := newDockerTaskEngineState()
 
 	for _, task := range saved.Tasks {
 		clean.AddTask(task)
+	}
+	// add image states
+	for _, imageState := range saved.ImageStates {
+		clean.AddImageState(imageState)
 	}
 	for id, container := range saved.IdToContainer {
 		taskArn, ok := saved.IdToTask[id]
@@ -74,6 +81,7 @@ func (state *DockerTaskEngineState) UnmarshalJSON(data []byte) error {
 		container.Container = taskContainer
 		//pointer matching now; everyone happy
 		clean.AddContainer(container, task)
+
 	}
 
 	*state = *clean

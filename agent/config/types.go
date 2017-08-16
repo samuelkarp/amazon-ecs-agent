@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -114,6 +114,35 @@ type Config struct {
 
 	// CredentialsAuditLogEnabled specifies whether audit logging is disabled.
 	CredentialsAuditLogDisabled bool
+
+	// TaskIAMRoleEnabledForNetworkHost specifies if the Agent is capable of launching
+	// tasks with IAM Roles when networkMode is set to 'host'
+	TaskIAMRoleEnabledForNetworkHost bool
+
+	// ImageCleanupDisabled specifies whether the Agent will periodically perform
+	// automated image cleanup
+	ImageCleanupDisabled bool
+
+	// MinimumImageDeletionAge specifies the minimum time since it was pulled
+	// before it can be deleted
+	MinimumImageDeletionAge time.Duration
+
+	// ImageCleanupInterval specifies the time to wait before performing the image
+	// cleanup since last time it was executed
+	ImageCleanupInterval time.Duration
+
+	// NumImagesToDeletePerCycle specifies the num of image to delete every time
+	// when Agent performs cleanup
+	NumImagesToDeletePerCycle int
+
+	// InstanceAttributes contains key/value pairs representing
+	// attributes to be associated with this instance within the
+	// ECS service and used to influence behavior such as launch
+	// placement.
+	InstanceAttributes map[string]string
+
+	// Set if clients validate ssl certificates. Used mainly for testing
+	AcceptInsecureCert bool `json:"-"`
 }
 
 // SensitiveRawMessage is a struct to store some data that should not be logged
@@ -125,9 +154,12 @@ type SensitiveRawMessage struct {
 	contents json.RawMessage
 }
 
-// NewSensitiveRawMessage returns a new encapsulated json.RawMessage that
-// cannot be accidentally logged via .String/.GoString/%v/%#v
+// NewSensitiveRawMessage returns a new encapsulated json.RawMessage or nil if
+// the data is empty. It cannot be accidentally logged via .String/.GoString/%v/%#v
 func NewSensitiveRawMessage(data json.RawMessage) *SensitiveRawMessage {
+	if len(data) == 0 {
+		return nil
+	}
 	return &SensitiveRawMessage{contents: data}
 }
 

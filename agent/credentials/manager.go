@@ -15,7 +15,6 @@ package credentials
 
 import (
 	"fmt"
-	"net/url"
 	"sync"
 
 	"github.com/aws/amazon-ecs-agent/agent/acs/model/ecsacs"
@@ -23,23 +22,29 @@ import (
 )
 
 const (
-	// CredentialsIdQueryParameterName is the name of GET query parameter for the task ID.
-	CredentialsIdQueryParameterName = "id"
+	// CredentialsIDQueryParameterName is the name of GET query parameter for the task ID.
+	CredentialsIDQueryParameterName = "id"
 
 	// CredentialsPath is the path to the credentials handler.
-	CredentialsPath = "/v1/credentials"
+	CredentialsPath = V2CredentialsPath
+
+	V1CredentialsPath = "/v1/credentials"
+	V2CredentialsPath = "/v2/credentials"
 
 	// credentialsEndpointRelativeURIFormat defines the relative URI format
 	// for the credentials endpoint. The place holders are the API Path and
-	// Query Parameters.
-	credentialsEndpointRelativeURIFormat = "%s?%s"
+	// credentials ID
+	credentialsEndpointRelativeURIFormat = v2CredentialsEndpointRelativeURIFormat
+
+	v1CredentialsEndpointRelativeURIFormat = "%s?" + CredentialsIDQueryParameterName + "=%s"
+	v2CredentialsEndpointRelativeURIFormat = "%s/%s"
 )
 
 // IAMRoleCredentials is used to save credentials sent by ACS
 type IAMRoleCredentials struct {
-	CredentialsId   string `json:"-"`
+	CredentialsID   string `json:"-"`
 	RoleArn         string `json:"RoleArn"`
-	AccessKeyId     string `json:"AccessKeyId"`
+	AccessKeyID     string `json:"AccessKeyId"`
 	SecretAccessKey string `json:"SecretAccessKey"`
 	SessionToken    string `json:"Token"`
 	// Expiration is a string instead of a timestamp. This is to avoid any loss of context
@@ -48,30 +53,35 @@ type IAMRoleCredentials struct {
 	Expiration string `json:"Expiration"`
 }
 
+// TaskIAMRoleCredentials wraps the task arn and the credentials object for the same
+type TaskIAMRoleCredentials struct {
+	ARN                string
+	IAMRoleCredentials IAMRoleCredentials
+}
+
 // GenerateCredentialsEndpointRelativeURI generates the relative URI for the
 // credentials endpoint, for a given task id.
 func (roleCredentials *IAMRoleCredentials) GenerateCredentialsEndpointRelativeURI() string {
-	params := make(url.Values)
-	params[CredentialsIdQueryParameterName] = []string{roleCredentials.CredentialsId}
-	return fmt.Sprintf(credentialsEndpointRelativeURIFormat, CredentialsPath, params.Encode())
+	return fmt.Sprintf(credentialsEndpointRelativeURIFormat, CredentialsPath, roleCredentials.CredentialsID)
 }
 
 // credentialsManager implements the Manager interface. It is used to
 // save credentials sent from ACS and to retrieve credentials from
 // the credentials endpoint
 type credentialsManager struct {
-	idToCredentials map[string]*IAMRoleCredentials
-	credentialsLock sync.RWMutex
+	// idToTaskCredentials maps credentials id to its corresponding TaskIAMRoleCredentials object
+	idToTaskCredentials map[string]*TaskIAMRoleCredentials
+	taskCredentialsLock sync.RWMutex
 }
 
 // IAMRoleCredentialsFromACS translates ecsacs.IAMRoleCredentials object to
 // api.IAMRoleCredentials
 func IAMRoleCredentialsFromACS(roleCredentials *ecsacs.IAMRoleCredentials) IAMRoleCredentials {
 	return IAMRoleCredentials{
-		CredentialsId:   aws.StringValue(roleCredentials.CredentialsId),
+		CredentialsID:   aws.StringValue(roleCredentials.CredentialsId),
 		SessionToken:    aws.StringValue(roleCredentials.SessionToken),
 		RoleArn:         aws.StringValue(roleCredentials.RoleArn),
-		AccessKeyId:     aws.StringValue(roleCredentials.AccessKeyId),
+		AccessKeyID:     aws.StringValue(roleCredentials.AccessKeyId),
 		SecretAccessKey: aws.StringValue(roleCredentials.SecretAccessKey),
 		Expiration:      aws.StringValue(roleCredentials.Expiration),
 	}
@@ -80,44 +90,55 @@ func IAMRoleCredentialsFromACS(roleCredentials *ecsacs.IAMRoleCredentials) IAMRo
 // NewManager creates a new credentials manager object
 func NewManager() Manager {
 	return &credentialsManager{
-		idToCredentials: make(map[string]*IAMRoleCredentials),
+		idToTaskCredentials: make(map[string]*TaskIAMRoleCredentials),
 	}
 }
 
-// SetCredentials adds or updates credentials in the credentials manager
-func (manager *credentialsManager) SetCredentials(credentials IAMRoleCredentials) error {
-	manager.credentialsLock.Lock()
-	defer manager.credentialsLock.Unlock()
+// SetTaskCredentials adds or updates credentials in the credentials manager
+func (manager *credentialsManager) SetTaskCredentials(taskCredentials TaskIAMRoleCredentials) error {
+	manager.taskCredentialsLock.Lock()
+	defer manager.taskCredentialsLock.Unlock()
 
-	if credentials.CredentialsId == "" {
+	credentials := taskCredentials.IAMRoleCredentials
+	// Validate that credentials id is not empty
+	if credentials.CredentialsID == "" {
 		return fmt.Errorf("CredentialsId is empty")
 	}
 
+	// Validate that task arn is not empty
+	if taskCredentials.ARN == "" {
+		return fmt.Errorf("task ARN is empty")
+	}
+
 	// Check if credentials exists for the given credentials id
-	credentialsInMap, ok := manager.idToCredentials[credentials.CredentialsId]
+	taskCredentialsInMap, ok := manager.idToTaskCredentials[credentials.CredentialsID]
 	if !ok {
 		// No existing credentials, create a new one
-		credentialsInMap = &IAMRoleCredentials{}
+		taskCredentialsInMap = &TaskIAMRoleCredentials{}
 	}
-	*credentialsInMap = credentials
-	manager.idToCredentials[credentials.CredentialsId] = credentialsInMap
+	*taskCredentialsInMap = taskCredentials
+	manager.idToTaskCredentials[credentials.CredentialsID] = taskCredentialsInMap
 
 	return nil
 }
 
-// GetCredentials retrieves credentials for a given credentials id
-func (manager *credentialsManager) GetCredentials(id string) (*IAMRoleCredentials, bool) {
-	manager.credentialsLock.RLock()
-	defer manager.credentialsLock.RUnlock()
+// GetTaskCredentials retrieves credentials for a given credentials id
+func (manager *credentialsManager) GetTaskCredentials(id string) (TaskIAMRoleCredentials, bool) {
+	manager.taskCredentialsLock.RLock()
+	defer manager.taskCredentialsLock.RUnlock()
 
-	credentials, ok := manager.idToCredentials[id]
-	return credentials, ok
+	taskCredentials, ok := manager.idToTaskCredentials[id]
+
+	if !ok {
+		return TaskIAMRoleCredentials{}, ok
+	}
+	return *taskCredentials, ok
 }
 
 // RemoveCredentials removes credentials from the credentials manager
 func (manager *credentialsManager) RemoveCredentials(id string) {
-	manager.credentialsLock.Lock()
-	defer manager.credentialsLock.Unlock()
+	manager.taskCredentialsLock.Lock()
+	defer manager.taskCredentialsLock.Unlock()
 
-	delete(manager.idToCredentials, id)
+	delete(manager.idToTaskCredentials, id)
 }

@@ -32,11 +32,12 @@ type payloadRequestHandler struct {
 	// messageBuffer is used to process PayloadMessages received from the server
 	messageBuffer chan *ecsacs.PayloadMessage
 	// ackRequest is used to send acks to the backend
-	ackRequest chan string
-	ctx        context.Context
-	taskEngine engine.TaskEngine
-	ecsClient  api.ECSClient
-	saver      statemanager.Saver
+	ackRequest  chan string
+	ctx         context.Context
+	taskEngine  engine.TaskEngine
+	ecsClient   api.ECSClient
+	saver       statemanager.Saver
+	taskHandler *eventhandler.TaskHandler
 	// cancel is used to stop go routines started by start() method
 	cancel               context.CancelFunc
 	cluster              string
@@ -47,7 +48,17 @@ type payloadRequestHandler struct {
 }
 
 // newPayloadRequestHandler returns a new payloadRequestHandler object
-func newPayloadRequestHandler(ctx context.Context, taskEngine engine.TaskEngine, ecsClient api.ECSClient, cluster string, containerInstanceArn string, acsClient wsclient.ClientServer, saver statemanager.Saver, refreshHandler refreshCredentialsHandler, credentialsManager credentials.Manager) payloadRequestHandler {
+func newPayloadRequestHandler(
+	ctx context.Context,
+	taskEngine engine.TaskEngine,
+	ecsClient api.ECSClient,
+	cluster string,
+	containerInstanceArn string,
+	acsClient wsclient.ClientServer,
+	saver statemanager.Saver,
+	refreshHandler refreshCredentialsHandler,
+	credentialsManager credentials.Manager,
+	taskHandler *eventhandler.TaskHandler) payloadRequestHandler {
 	// Create a cancelable context from the parent context
 	derivedContext, cancel := context.WithCancel(ctx)
 	return payloadRequestHandler{
@@ -56,6 +67,7 @@ func newPayloadRequestHandler(ctx context.Context, taskEngine engine.TaskEngine,
 		taskEngine:           taskEngine,
 		ecsClient:            ecsClient,
 		saver:                saver,
+		taskHandler:          taskHandler,
 		ctx:                  derivedContext,
 		cancel:               cancel,
 		cluster:              cluster,
@@ -153,12 +165,8 @@ func (payloadHandler *payloadRequestHandler) handleSingleMessage(payload *ecsacs
 		}
 		payloadHandler.ackRequest <- *payload.MessageId
 	}()
-	// Record the sequence number as well
-	if payload.SeqNum != nil {
-		SequenceNumber.Set(*payload.SeqNum)
-	}
-	return nil
 
+	return nil
 }
 
 // addPayloadTasks does validation on each task and, for all valid ones, adds
@@ -185,14 +193,17 @@ func (payloadHandler *payloadRequestHandler) addPayloadTasks(payload *ecsacs.Pay
 			// The payload from ACS for the task has credentials for the
 			// task. Add those to the credentials manager and set the
 			// credentials id for the task as well
-			taskCredentials := credentials.IAMRoleCredentialsFromACS(task.RoleCredentials)
-			err = payloadHandler.credentialsManager.SetCredentials(taskCredentials)
+			taskCredentials := credentials.TaskIAMRoleCredentials{
+				ARN:                aws.StringValue(task.Arn),
+				IAMRoleCredentials: credentials.IAMRoleCredentialsFromACS(task.RoleCredentials),
+			}
+			err = payloadHandler.credentialsManager.SetTaskCredentials(taskCredentials)
 			if err != nil {
 				payloadHandler.handleUnrecognizedTask(task, err, payload)
 				allTasksOK = false
 				continue
 			}
-			apiTask.SetCredentialsId(taskCredentials.CredentialsId)
+			apiTask.SetCredentialsID(taskCredentials.IAMRoleCredentials.CredentialsID)
 		}
 		validTasks = append(validTasks, apiTask)
 	}
@@ -218,7 +229,7 @@ func (payloadHandler *payloadRequestHandler) addTasks(payload *ecsacs.PayloadMes
 	allTasksOK := true
 	var credentialsAcks []*ecsacs.IAMRoleCredentialsAckRequest
 	for _, task := range tasks {
-		if skipAddTask(task.DesiredStatus) {
+		if skipAddTask(task.GetDesiredStatus()) {
 			continue
 		}
 		err := payloadHandler.taskEngine.AddTask(task)
@@ -230,21 +241,21 @@ func (payloadHandler *payloadRequestHandler) addTasks(payload *ecsacs.PayloadMes
 
 		// Generate an ack request for the credentials in the task, if the
 		// task is associated with an IAM Role
-		taskCredentialsId := task.GetCredentialsId()
+		taskCredentialsId := task.GetCredentialsID()
 		if taskCredentialsId == "" {
 			// CredentialsId not set for task, no need to ack.
 			continue
 		}
 
-		creds, ok := payloadHandler.credentialsManager.GetCredentials(taskCredentialsId)
+		creds, ok := payloadHandler.credentialsManager.GetTaskCredentials(taskCredentialsId)
 		if !ok {
 			seelog.Errorf("Credentials could not be retrieved for task: %s", task.Arn)
 			allTasksOK = false
 		} else {
 			credentialsAcks = append(credentialsAcks, &ecsacs.IAMRoleCredentialsAckRequest{
 				MessageId:     payload.MessageId,
-				Expiration:    aws.String(creds.Expiration),
-				CredentialsId: aws.String(creds.CredentialsId),
+				Expiration:    aws.String(creds.IAMRoleCredentials.Expiration),
+				CredentialsId: aws.String(creds.IAMRoleCredentials.CredentialsID),
 			})
 		}
 
@@ -275,11 +286,13 @@ func (payloadHandler *payloadRequestHandler) handleUnrecognizedTask(task *ecsacs
 	}
 
 	// Only need to stop the task; it brings down the containers too.
-	eventhandler.AddTaskEvent(api.TaskStateChange{
+	taskEvent := api.TaskStateChange{
 		TaskArn: *task.Arn,
 		Status:  api.TaskStopped,
 		Reason:  UnrecognizedTaskError{err}.Error(),
-	}, payloadHandler.ecsClient)
+	}
+
+	payloadHandler.taskHandler.AddStateChangeEvent(taskEvent, payloadHandler.ecsClient)
 }
 
 // clearAcks drains the ack request channel

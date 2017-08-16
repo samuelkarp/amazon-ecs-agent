@@ -1,5 +1,76 @@
 # Changelog
 
+## 1.14.3
+* Bug - Fix a deadlock that was caused by the ImageCleanup and Image Pull. [#836](https://github.com/aws/amazon-ecs-agent/pull/836)
+
+## 1.14.2
+* Enhancement - Added introspection API for querying tasks by short docker ID, by [@aaronwalker](https://github.com/aaronwalker). [#813](https://github.com/aws/amazon-ecs-agent/pull/813)
+* Bug - Added checks for circular task dependencies. [#796](https://github.com/aws/amazon-ecs-agent/pull/796)
+* Bug - Fixed an issue with Docker auth configuration overrides. [#751](https://github.com/aws/amazon-ecs-agent/pull/751)
+* Bug - Fixed a race condition in the task clean up code path. [#737](https://github.com/aws/amazon-ecs-agent/pull/737)
+* Bug - Fixed an issue involving concurrent map writes. [#743](https://github.com/aws/amazon-ecs-agent/pull/743)
+
+## 1.14.1
+* Enhancement - Log completion of image pulls. [#715](https://github.com/aws/amazon-ecs-agent/pull/715)
+* Enhancement - Increase start and create timeouts to improve reliability under
+  some workloads. [#696](https://github.com/aws/amazon-ecs-agent/pull/696)
+* Bug - Fixed a bug where throttles on state change reporting could lead to
+  corrupted state. [#705](https://github.com/aws/amazon-ecs-agent/pull/705)
+* Bug - Correct formatting of log messages from tcshandler. [#693](https://github.com/aws/amazon-ecs-agent/pull/693)
+* Bug - Fixed an issue where agent could crash. [#692](https://github.com/aws/amazon-ecs-agent/pull/692)
+
+## 1.14.0
+* Feature - Support definition of custom attributes on agent registration.
+* Feature - Support Docker on Windows Server 2016.
+* Enhancement - Enable concurrent docker pull for docker version >= 1.11.1.
+* Bug - Fixes a bug where a task could be prematurely marked as stopped.
+* Bug - Fixes an issue where ECS Agent would keep reconnecting to ACS without any backoff.
+* Bug - Fix memory metric to exclude cache value.
+
+## 1.13.1
+* Enhancement - Added cache for DiscoverPollEndPoint API.
+* Enhancement - Expose port 51679 so docker tasks can fetch IAM credentials.
+* Bug - fixed a bug that could lead to exhausting the open file limit.
+* Bug - Fixed a bug where images were not deleted when using image cleanup.
+* Bug - Fixed a bug where task status may be reported as pending while task is running.
+* Bug - Fixed a bug where task may have a temporary "RUNNING" state when
+  task failed to start.
+* Bug - Fixed a bug where CPU metrics would be reported incorrectly for kernel >= 4.7.0.
+* Bug - Fixed a bug that may cause agent not report metrics.
+
+## 1.13.0
+* Feature - Implemented automated image cleanup.
+* Enhancement - Add credential caching for ECR.
+* Enhancement - Add support for security-opt=no-new-privileges.
+* Bug - Fixed a potential deadlock in dockerstate.
+
+## 1.12.2
+* Bug - Fixed a bug where agent keeps fetching stats of stopped containers.
+
+## 1.12.1
+* Bug - Fixed a bug where agent keeps fetching stats of stopped containers.
+* Bug - Fixed a bug that could lead to exhausting the open file limit.
+* Bug - Fixed a bug where the introspection API could return the wrong response code.
+
+## 1.12.0
+* Enhancement - Support Task IAM Role for containers launched with 'host' network mode.
+
+## 1.11.1
+* Bug - Fixed a bug where telemetry data would fail to serialize properly.
+* Bug - Addressed an issue where telemetry would be reported after the
+  container instance was deregistered.
+
+## 1.11.0
+* Feature - Support IAM roles for tasks.
+* Feature - Add support for the Splunk logging driver.
+* Enhancement - Reduced pull status verbosity in debug mode.
+* Enhancement - Add a Docker label for ECS cluster.
+* Bug - Fixed a bug that could cause a container to be marked as STOPPED while
+  still running on the instance.
+* Bug - Fixed a potential race condition in metrics collection.
+* Bug - Resolved a bug where some state could be retained across different
+  container instances when launching from a snapshotted AMI.
+
 ## 1.10.0
 * Feature - Make the `docker stop` timeout configurable.
 * Enhancement - Use `docker stats` as the data source for CloudWatch metrics.

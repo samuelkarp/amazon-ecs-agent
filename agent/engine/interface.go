@@ -17,21 +17,24 @@ import (
 	"encoding/json"
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
+	"github.com/aws/amazon-ecs-agent/agent/statechange"
 	"github.com/aws/amazon-ecs-agent/agent/statemanager"
+	"golang.org/x/net/context"
 )
 
+// TaskEngine is an interface for the DockerTaskEngine
 type TaskEngine interface {
-	Init() error
-	MustInit()
+	Init(context.Context) error
+	MustInit(context.Context)
 	// Disable *must* only be called when this engine will no longer be used
 	// (e.g. right before exiting down the process). It will irreversably stop
 	// this task engine from processing new tasks
 	Disable()
 
-	// TaskEvents will provide information about tasks that have been previously
+	// StateChangeEvents will provide information about tasks that have been previously
 	// executed. Specifically, it will provide information when they reach
 	// running or stopped, as well as providing portbinding and other metadata
-	TaskEvents() (<-chan api.TaskStateChange, <-chan api.ContainerStateChange)
+	StateChangeEvents() <-chan statechange.Event
 	SetSaver(statemanager.Saver)
 
 	// AddTask adds a new task to the task engine and manages its container's

@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -32,13 +32,11 @@ import (
 
 var log = logger.ForModule("Handlers")
 
-const statusBadRequest = 400
-const statusNotImplemented = 501
-const statusOK = 200
-const statusInternalServerError = 500
-
-const dockerIdQueryField = "dockerid"
-const taskArnQueryField = "taskarn"
+const (
+	dockerIdQueryField = "dockerid"
+	taskArnQueryField  = "taskarn"
+	dockerShortIdLen   = 12
+)
 
 type rootResponse struct {
 	AvailableCommands []string
@@ -71,12 +69,13 @@ func newTaskResponse(task *api.Task, containerMap map[string]*api.DockerContaine
 		if container.Container.IsInternal {
 			continue
 		}
-		containers = append(containers, ContainerResponse{container.DockerId, container.DockerName, containerName})
+		containers = append(containers, ContainerResponse{container.DockerID, container.DockerName, containerName})
 	}
 
 	knownStatus := task.GetKnownStatus()
 	knownBackendStatus := knownStatus.BackendStatus()
-	desiredStatus := task.DesiredStatus.BackendStatus()
+	desiredStatusInAgent := task.GetDesiredStatus()
+	desiredStatus := desiredStatusInAgent.BackendStatus()
 
 	if (knownBackendStatus == "STOPPED" && desiredStatus != "STOPPED") || (knownBackendStatus == "RUNNING" && desiredStatus == "PENDING") {
 		desiredStatus = ""
@@ -92,7 +91,7 @@ func newTaskResponse(task *api.Task, containerMap map[string]*api.DockerContaine
 	}
 }
 
-func newTasksResponse(state *dockerstate.DockerTaskEngineState) *TasksResponse {
+func newTasksResponse(state dockerstate.TaskEngineState) *TasksResponse {
 	allTasks := state.AllTasks()
 	taskResponses := make([]*TaskResponse, len(allTasks))
 	for ndx, task := range allTasks {
@@ -104,16 +103,16 @@ func newTasksResponse(state *dockerstate.DockerTaskEngineState) *TasksResponse {
 }
 
 // Creates JSON response and sets the http status code for the task queried.
-func createTaskJSONResponse(task *api.Task, found bool, resourceId string, state *dockerstate.DockerTaskEngineState) ([]byte, int) {
+func createTaskJSONResponse(task *api.Task, found bool, resourceId string, state dockerstate.TaskEngineState) ([]byte, int) {
 	var responseJSON []byte
-	status := statusOK
+	status := http.StatusOK
 	if found {
 		containerMap, _ := state.ContainerMapByArn(task.Arn)
 		responseJSON, _ = json.Marshal(newTaskResponse(task, containerMap))
 	} else {
 		log.Warn("Could not find requsted resource: " + resourceId)
 		responseJSON, _ = json.Marshal(&TaskResponse{})
-		status = statusBadRequest
+		status = http.StatusNotFound
 	}
 	return responseJSON, status
 }
@@ -130,13 +129,31 @@ func tasksV1RequestHandlerMaker(taskEngine DockerStateResolver) func(http.Respon
 		var status int
 		if dockerIdExists && taskArnExists {
 			log.Info("Request contains both ", dockerIdQueryField, " and ", taskArnQueryField, ". Expect at most one of these.")
-			w.WriteHeader(statusBadRequest)
+			w.WriteHeader(http.StatusBadRequest)
 			w.Write(responseJSON)
 			return
 		}
 		if dockerIdExists {
 			// Create TaskResponse for the docker id in the query.
-			task, found := dockerTaskEngineState.TaskById(dockerId)
+			var task *api.Task
+			var found bool
+			if len(dockerId) > dockerShortIdLen {
+				task, found = dockerTaskEngineState.TaskByID(dockerId)
+			} else {
+				tasks, _ := dockerTaskEngineState.TaskByShortID(dockerId)
+				if len(tasks) == 0 {
+					task = nil
+					found = false
+				} else if len(tasks) == 1 {
+					task = tasks[0]
+					found = true
+				} else {
+					log.Info("Multiple tasks found for requsted dockerId: " + dockerId)
+					w.WriteHeader(http.StatusBadRequest)
+					w.Write(responseJSON)
+					return
+				}
+			}
 			responseJSON, status = createTaskJSONResponse(task, found, dockerId, dockerTaskEngineState)
 			w.WriteHeader(status)
 		} else if taskArnExists {
@@ -163,7 +180,7 @@ func licenseHandler(w http.ResponseWriter, h *http.Request) {
 	}
 }
 
-func setupServer(containerInstanceArn *string, taskEngine DockerStateResolver, cfg *config.Config) http.Server {
+func setupServer(containerInstanceArn *string, taskEngine DockerStateResolver, cfg *config.Config) *http.Server {
 	serverFunctions := map[string]func(w http.ResponseWriter, r *http.Request){
 		"/v1/metadata": metadataV1RequestHandlerMaker(containerInstanceArn, cfg),
 		"/v1/tasks":    tasksV1RequestHandlerMaker(taskEngine),
@@ -192,7 +209,7 @@ func setupServer(containerInstanceArn *string, taskEngine DockerStateResolver, c
 	loggingServeMux := http.NewServeMux()
 	loggingServeMux.Handle("/", LoggingHandler{serverMux})
 
-	server := http.Server{
+	server := &http.Server{
 		Addr:         ":" + strconv.Itoa(config.AgentIntrospectionPort),
 		Handler:      loggingServeMux,
 		ReadTimeout:  5 * time.Second,

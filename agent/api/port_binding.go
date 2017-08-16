@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -24,6 +24,18 @@ const (
 	UnparseablePortErrorName               = "UnparsablePort"
 )
 
+// PortBinding represents a port binding for a container
+type PortBinding struct {
+	// ContainerPort is the port inside the container
+	ContainerPort uint16
+	// HostPort is the port exposed on the host
+	HostPort uint16
+	// BindIP is the IP address to which the port is bound
+	BindIP string `json:"BindIp"`
+	// Protocol is the protocol of the port
+	Protocol TransportProtocol
+}
+
 // PortBindingFromDockerPortBinding constructs a PortBinding slice from a docker
 // NetworkSettings.Ports map.
 func PortBindingFromDockerPortBinding(dockerPortBindings map[docker.Port][]docker.PortBinding) ([]PortBinding, NamedError) {
@@ -47,7 +59,7 @@ func PortBindingFromDockerPortBinding(dockerPortBindings map[docker.Port][]docke
 			portBindings = append(portBindings, PortBinding{
 				ContainerPort: uint16(containerPort),
 				HostPort:      uint16(hostPort),
-				BindIp:        binding.HostIP,
+				BindIP:        binding.HostIP,
 				Protocol:      protocol,
 			})
 		}

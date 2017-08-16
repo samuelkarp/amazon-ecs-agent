@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -38,7 +38,7 @@ func ContainersEqual(lhs, rhs *api.Container) bool {
 	if !utils.StrSliceEqual(lhs.Command, rhs.Command) {
 		return false
 	}
-	if lhs.Cpu != rhs.Cpu || lhs.Memory != rhs.Memory {
+	if lhs.CPU != rhs.CPU || lhs.Memory != rhs.Memory {
 		return false
 	}
 	// Order doesn't matter
@@ -76,20 +76,14 @@ func ContainersEqual(lhs, rhs *api.Container) bool {
 	if !ContainerOverridesEqual(lhs.Overrides, rhs.Overrides) {
 		return false
 	}
-	if lhs.DesiredStatus != rhs.DesiredStatus || lhs.KnownStatus != rhs.KnownStatus {
+	if lhs.DesiredStatusUnsafe != rhs.DesiredStatusUnsafe || lhs.KnownStatusUnsafe != rhs.KnownStatusUnsafe {
 		return false
 	}
 	if lhs.AppliedStatus != rhs.AppliedStatus {
 		return false
 	}
-	if lhs.KnownExitCode == nil || rhs.KnownExitCode == nil {
-		if lhs.KnownExitCode != nil || rhs.KnownExitCode != nil {
-			return false
-		}
-	} else {
-		if *lhs.KnownExitCode != *rhs.KnownExitCode {
-			return false
-		}
+	if !reflect.DeepEqual(lhs.GetKnownExitCode(), rhs.GetKnownExitCode()) {
+		return false
 	}
 
 	return true

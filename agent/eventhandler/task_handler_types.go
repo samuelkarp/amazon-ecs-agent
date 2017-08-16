@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -14,15 +14,9 @@
 package eventhandler
 
 import (
-	"container/list"
-	"sync"
-
 	"github.com/aws/amazon-ecs-agent/agent/api"
-	"github.com/aws/amazon-ecs-agent/agent/utils"
+	"sync"
 )
-
-// Maximum number of tasks that may be handled at once by the taskHandler
-const concurrentEventCalls = 3
 
 // a state change that may have a container and, optionally, a task event to
 // send
@@ -35,9 +29,14 @@ type sendableEvent struct {
 
 	taskSent   bool
 	taskChange api.TaskStateChange
+
+	lock sync.RWMutex
 }
 
-func (event sendableEvent) String() string {
+func (event *sendableEvent) String() string {
+	event.lock.RLock()
+	defer event.lock.RUnlock()
+
 	if event.isContainerEvent {
 		return "ContainerChange: " + event.containerChange.String()
 	} else {
@@ -69,6 +68,8 @@ func (event *sendableEvent) taskArn() string {
 }
 
 func (event *sendableEvent) taskShouldBeSent() bool {
+	event.lock.RLock()
+	defer event.lock.RUnlock()
 	if event.isContainerEvent {
 		return false
 	}
@@ -76,42 +77,31 @@ func (event *sendableEvent) taskShouldBeSent() bool {
 	if tevent.Status == api.TaskStatusNone {
 		return false // defensive programming :)
 	}
-	if event.taskSent || (tevent.SentStatus != nil && *tevent.SentStatus >= tevent.Status) {
+	if event.taskSent || (tevent.Task != nil && tevent.Task.GetSentStatus() >= tevent.Status) {
 		return false // redundant event
 	}
 	return true
 }
 
 func (event *sendableEvent) containerShouldBeSent() bool {
+	event.lock.RLock()
+	defer event.lock.RUnlock()
 	if !event.isContainerEvent {
 		return false
 	}
 	cevent := event.containerChange
-	if event.containerSent || (cevent.SentStatus != nil && *cevent.SentStatus >= cevent.Status) {
+	if event.containerSent || (cevent.Container != nil && cevent.Container.GetSentStatus() >= cevent.Status) {
 		return false
 	}
 	return true
 }
 
-type eventList struct {
-	sending    bool // whether the list is already being handled
-	sync.Mutex      // Locks both the list and sending bool
-	*list.List      // list of *sendableEvents
-}
-
-type taskHandler struct {
-	submitSemaphore utils.Semaphore       // Semaphore on the number of tasks that may be handled at once
-	taskMap         map[string]*eventList // arn:*eventList map so events may be serialized per task
-
-	sync.RWMutex // Lock for the taskMap
-}
-
-func newTaskHandler() *taskHandler {
-	taskMap := make(map[string]*eventList)
-	submitSemaphore := utils.NewSemaphore(concurrentEventCalls)
-
-	return &taskHandler{
-		taskMap:         taskMap,
-		submitSemaphore: submitSemaphore,
+func (event *sendableEvent) setSent() {
+	event.lock.Lock()
+	defer event.lock.Unlock()
+	if event.isContainerEvent {
+		event.containerSent = true
+	} else {
+		event.taskSent = true
 	}
 }

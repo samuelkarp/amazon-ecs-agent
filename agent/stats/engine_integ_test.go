@@ -1,4 +1,6 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+//+build !windows,integration
+// Disabled on Windows until Stats are actually supported
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -14,107 +16,36 @@
 package stats
 
 import (
-	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	"github.com/aws/amazon-ecs-agent/agent/config"
-	"github.com/aws/amazon-ecs-agent/agent/engine"
-	"github.com/aws/amazon-ecs-agent/agent/engine/dockerclient"
-	"github.com/aws/amazon-ecs-agent/agent/utils"
+	ecsengine "github.com/aws/amazon-ecs-agent/agent/engine"
+	"github.com/aws/amazon-ecs-agent/agent/engine/dockerstate"
 	docker "github.com/fsouza/go-dockerclient"
 )
 
-const (
-	testImageName = "amazon/amazon-ecs-gremlin:make"
-
-	// defaultDockerTimeoutSeconds is the timeout for dialing the docker remote API.
-	defaultDockerTimeoutSeconds uint = 10
-
-	// waitForCleanupSleep is the sleep duration in milliseconds
-	// for the waiting after container cleanup before checking the state of the manager.
-	waitForCleanupSleep = 10 * time.Millisecond
-
-	taskArn               = "gremlin"
-	taskDefinitionFamily  = "docker-gremlin"
-	taskDefinitionVersion = "1"
-	containerName         = "gremlin-container"
-)
-
-var endpoint = utils.DefaultIfBlank(os.Getenv(engine.DOCKER_ENDPOINT_ENV_VARIABLE), engine.DOCKER_DEFAULT_ENDPOINT)
-
-var client, _ = docker.NewClient(endpoint)
-var clientFactory = dockerclient.NewFactory(endpoint)
-var cfg = config.DefaultConfig()
-
-var dockerClient engine.DockerClient
-
-func init() {
-	cfg.EngineAuthData = config.NewSensitiveRawMessage([]byte{})
-	dockerClient, _ = engine.NewDockerGoClient(clientFactory, false, &cfg)
-}
-
-// createGremlin creates the gremlin container using the docker client.
-// It is used only in the test code.
-func createGremlin(client *docker.Client) (*docker.Container, error) {
-	container, err := client.CreateContainer(docker.CreateContainerOptions{
-		Config: &docker.Config{
-			Image: testImageName,
-		},
-	})
-
-	return container, err
-}
-
-type IntegContainerMetadataResolver struct {
-	containerIDToTask map[string]*api.Task
-	containerIDToName map[string]string
-}
-
-func newIntegContainerMetadataResolver() *IntegContainerMetadataResolver {
-	resolver := IntegContainerMetadataResolver{
-		containerIDToTask: make(map[string]*api.Task),
-		containerIDToName: make(map[string]string),
-	}
-
-	return &resolver
-}
-
-func (resolver *IntegContainerMetadataResolver) ResolveTask(containerID string) (*api.Task, error) {
-	task, exists := resolver.containerIDToTask[containerID]
-	if !exists {
-		return nil, fmt.Errorf("unmapped container")
-	}
-
-	return task, nil
-}
-
-func (resolver *IntegContainerMetadataResolver) ResolveName(dockerID string) (string, error) {
-	name, exists := resolver.containerIDToName[dockerID]
-	if !exists {
-		return "", fmt.Errorf("unmapped container")
-	}
-
-	return name, nil
-}
-
 func (resolver *IntegContainerMetadataResolver) addToMap(containerID string) {
-	resolver.containerIDToTask[containerID] = &api.Task{Arn: taskArn, Family: taskDefinitionFamily, Version: taskDefinitionVersion}
-	resolver.containerIDToName[containerID] = containerName
+	resolver.containerIDToTask[containerID] = &api.Task{
+		Arn:     taskArn,
+		Family:  taskDefinitionFamily,
+		Version: taskDefinitionVersion,
+	}
+	resolver.containerIDToDockerContainer[containerID] = &api.DockerContainer{
+		DockerID:  containerID,
+		Container: &api.Container{},
+	}
 }
 
 func TestStatsEngineWithExistingContainers(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integ test in short mode")
-	}
-	engine := NewDockerStatsEngine(&cfg, dockerClient)
+	// Create a new docker stats engine
+	engine := NewDockerStatsEngine(&cfg, dockerClient, eventStream("TestStatsEngineWithExistingContainers"))
 
 	// Create a container to get the container id.
 	container, err := createGremlin(client)
 	if err != nil {
-		t.Fatal("Error creating container", err)
+		t.Fatalf("Error creating container: %v", err)
 	}
 	defer client.RemoveContainer(docker.RemoveContainerOptions{
 		ID:    container.ID,
@@ -134,49 +65,69 @@ func TestStatsEngineWithExistingContainers(t *testing.T) {
 
 	err = client.StartContainer(container.ID, nil)
 	if err != nil {
-		t.Error("Error starting container: ", container.ID, " error: ", err)
+		t.Errorf("Error starting container: %s, err: %v", container.ID, err)
 	}
 	defer client.StopContainer(container.ID, defaultDockerTimeoutSeconds)
+
+	err = engine.containerChangeEventStream.WriteToEventStream(ecsengine.DockerContainerChangeEvent{
+		Status: api.ContainerRunning,
+		DockerContainerMetadata: ecsengine.DockerContainerMetadata{
+			DockerID: container.ID,
+		},
+	})
+	if err != nil {
+		t.Errorf("Failed to write to container change event stream, err: %v", err)
+	}
 
 	// Simulate container start prior to listener initialization.
 	time.Sleep(checkPointSleep)
 	err = engine.Init()
 	if err != nil {
-		t.Error("Error initializing stats engine: ", err)
+		t.Errorf("Error initializing stats engine: %v", err)
 	}
-	defer engine.unsubscribeContainerEvents()
+	defer engine.containerChangeEventStream.Unsubscribe(containerChangeHandler)
 
 	// Wait for the stats collection go routine to start.
 	time.Sleep(checkPointSleep)
 
 	metadata, taskMetrics, err := engine.GetInstanceMetrics()
 	if err != nil {
-		t.Error("Error gettting instance metrics: ", err)
+		t.Errorf("Error gettting instance metrics: %v", err)
 	}
 	err = validateMetricsMetadata(metadata)
 	if err != nil {
-		t.Error("Error validating metadata: ", err)
+		t.Errorf("Error validating metadata: %v", err)
 	}
 
 	if len(taskMetrics) != 1 {
-		t.Fatal("Incorrect number of tasks. Expected: 1, got: ", len(taskMetrics))
+		t.Fatalf("Incorrect number of tasks. Expected: 1, got: %d", len(taskMetrics))
 	}
 
 	taskMetric := taskMetrics[0]
 	if *taskMetric.TaskDefinitionFamily != taskDefinitionFamily {
-		t.Error("Excpected task definition family to be: ", taskDefinitionFamily, " got: ", *taskMetric.TaskDefinitionFamily)
+		t.Errorf("Excpected task definition family to be: %s, got: %s", taskDefinitionFamily, *taskMetric.TaskDefinitionFamily)
 	}
 	if *taskMetric.TaskDefinitionVersion != taskDefinitionVersion {
-		t.Error("Excpected task definition family to be: ", taskDefinitionVersion, " got: ", *taskMetric.TaskDefinitionVersion)
+		t.Errorf("Excpected task definition family to be: %s, got: %s", taskDefinitionVersion, *taskMetric.TaskDefinitionVersion)
 	}
 	err = validateContainerMetrics(taskMetric.ContainerMetrics, 1)
 	if err != nil {
-		t.Error("Error validating container metrics: ", err)
+		t.Errorf("Error validating container metrics: %v", err)
 	}
 
 	err = client.StopContainer(container.ID, defaultDockerTimeoutSeconds)
 	if err != nil {
-		t.Error("Error stopping container: ", container.ID, " error: ", err)
+		t.Errorf("Error stopping container: %s, err: %v", container.ID, err)
+	}
+
+	err = engine.containerChangeEventStream.WriteToEventStream(ecsengine.DockerContainerChangeEvent{
+		Status: api.ContainerStopped,
+		DockerContainerMetadata: ecsengine.DockerContainerMetadata{
+			DockerID: container.ID,
+		},
+	})
+	if err != nil {
+		t.Errorf("Failed to write to container change event stream, err: %v", err)
 	}
 
 	time.Sleep(waitForCleanupSleep)
@@ -184,19 +135,18 @@ func TestStatsEngineWithExistingContainers(t *testing.T) {
 	// Should not contain any metrics after cleanup.
 	err = validateIdleContainerMetrics(engine)
 	if err != nil {
-		t.Fatal("Error validating idle metrics: ", err)
+		t.Fatalf("Error validating idle metrics: %v", err)
 	}
 }
 
 func TestStatsEngineWithNewContainers(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integ test in short mode")
-	}
-	engine := NewDockerStatsEngine(&cfg, dockerClient)
+	// Create a new docker stats engine
+	engine := NewDockerStatsEngine(&cfg, dockerClient, eventStream("TestStatsEngineWithNewContainers"))
+	defer engine.removeAll()
 
 	container, err := createGremlin(client)
 	if err != nil {
-		t.Fatal("Error creating container", err)
+		t.Fatalf("Error creating container: %v", err)
 	}
 	defer client.RemoveContainer(docker.RemoveContainerOptions{
 		ID:    container.ID,
@@ -216,14 +166,25 @@ func TestStatsEngineWithNewContainers(t *testing.T) {
 
 	err = engine.Init()
 	if err != nil {
-		t.Error("Error initializing stats engine: ", err)
+		t.Errorf("Error initializing stats engine: %v", err)
 	}
-	defer engine.unsubscribeContainerEvents()
+	defer engine.containerChangeEventStream.Unsubscribe(containerChangeHandler)
 
 	err = client.StartContainer(container.ID, nil)
 	defer client.StopContainer(container.ID, defaultDockerTimeoutSeconds)
 	if err != nil {
-		t.Error("Error starting container: ", container.ID, " error: ", err)
+		t.Errorf("Error starting container: %s, err: %v", container.ID, err)
+	}
+
+	// Write the container change event to event stream
+	err = engine.containerChangeEventStream.WriteToEventStream(ecsengine.DockerContainerChangeEvent{
+		Status: api.ContainerRunning,
+		DockerContainerMetadata: ecsengine.DockerContainerMetadata{
+			DockerID: container.ID,
+		},
+	})
+	if err != nil {
+		t.Errorf("Failed to write to container change event stream, err: %v", err)
 	}
 
 	// Wait for the stats collection go routine to start.
@@ -231,33 +192,43 @@ func TestStatsEngineWithNewContainers(t *testing.T) {
 
 	metadata, taskMetrics, err := engine.GetInstanceMetrics()
 	if err != nil {
-		t.Error("Error gettting instance metrics: ", err)
+		t.Errorf("Error gettting instance metrics: %v", err)
 	}
 
 	err = validateMetricsMetadata(metadata)
 	if err != nil {
-		t.Error("Error validating metadata: ", err)
+		t.Errorf("Error validating metadata: %v", err)
 	}
 
 	if len(taskMetrics) != 1 {
-		t.Fatal("Incorrect number of tasks. Expected: 1, got: ", len(taskMetrics))
+		t.Fatalf("Incorrect number of tasks. Expected: 1, got: %d", len(taskMetrics))
 	}
 	taskMetric := taskMetrics[0]
 	if *taskMetric.TaskDefinitionFamily != taskDefinitionFamily {
-		t.Error("Excpected task definition family to be: ", taskDefinitionFamily, " got: ", *taskMetric.TaskDefinitionFamily)
+		t.Errorf("Excpected task definition family to be: %s, got: %s", taskDefinitionFamily, *taskMetric.TaskDefinitionFamily)
 	}
 	if *taskMetric.TaskDefinitionVersion != taskDefinitionVersion {
-		t.Error("Excpected task definition family to be: ", taskDefinitionVersion, " got: ", *taskMetric.TaskDefinitionVersion)
+		t.Errorf("Excpected task definition family to be: %s, got: %s", taskDefinitionVersion, *taskMetric.TaskDefinitionVersion)
 	}
 
 	err = validateContainerMetrics(taskMetric.ContainerMetrics, 1)
 	if err != nil {
-		t.Error("Error validating container metrics: ", err)
+		t.Errorf("Error validating container metrics: %v", err)
 	}
 
 	err = client.StopContainer(container.ID, defaultDockerTimeoutSeconds)
 	if err != nil {
-		t.Error("Error stopping container: ", container.ID, " error: ", err)
+		t.Errorf("Error stopping container: %s, err: %v", container.ID, err)
+	}
+	// Write the container change event to event stream
+	err = engine.containerChangeEventStream.WriteToEventStream(ecsengine.DockerContainerChangeEvent{
+		Status: api.ContainerStopped,
+		DockerContainerMetadata: ecsengine.DockerContainerMetadata{
+			DockerID: container.ID,
+		},
+	})
+	if err != nil {
+		t.Errorf("Failed to write to container change event stream, err: %v", err)
 	}
 
 	time.Sleep(waitForCleanupSleep)
@@ -265,18 +236,16 @@ func TestStatsEngineWithNewContainers(t *testing.T) {
 	// Should not contain any metrics after cleanup.
 	err = validateIdleContainerMetrics(engine)
 	if err != nil {
-		t.Fatal("Error validating idle metrics: ", err)
+		t.Fatalf("Error validating idle metrics: %v", err)
 	}
 }
 
 func TestStatsEngineWithDockerTaskEngine(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integ test in short mode")
-	}
-	taskEngine := engine.NewTaskEngine(&config.Config{}, nil, nil)
+	containerChangeEventStream := eventStream("TestStatsEngineWithDockerTaskEngine")
+	taskEngine := ecsengine.NewTaskEngine(&config.Config{}, nil, nil, containerChangeEventStream, nil, dockerstate.NewTaskEngineState())
 	container, err := createGremlin(client)
 	if err != nil {
-		t.Fatal("Error creating container", err)
+		t.Fatalf("Error creating container: %v", err)
 	}
 	defer client.RemoveContainer(docker.RemoveContainerOptions{
 		ID:    container.ID,
@@ -284,52 +253,75 @@ func TestStatsEngineWithDockerTaskEngine(t *testing.T) {
 	})
 	unmappedContainer, err := createGremlin(client)
 	if err != nil {
-		t.Fatal("Error creating container", err)
+		t.Fatalf("Error creating container: %v", err)
 	}
 	defer client.RemoveContainer(docker.RemoveContainerOptions{
 		ID:    unmappedContainer.ID,
 		Force: true,
 	})
 	containers := []*api.Container{
-		&api.Container{
+		{
 			Name: "gremlin",
 		},
 	}
 	testTask := api.Task{
-		Arn:           "gremlin-task",
-		DesiredStatus: api.TaskRunning,
-		KnownStatus:   api.TaskRunning,
-		Family:        "test",
-		Version:       "1",
-		Containers:    containers,
+		Arn:                 "gremlin-task",
+		DesiredStatusUnsafe: api.TaskRunning,
+		KnownStatusUnsafe:   api.TaskRunning,
+		Family:              "test",
+		Version:             "1",
+		Containers:          containers,
 	}
 	// Populate Tasks and Container map in the engine.
-	dockerTaskEngine, _ := taskEngine.(*engine.DockerTaskEngine)
+	dockerTaskEngine, _ := taskEngine.(*ecsengine.DockerTaskEngine)
 	dockerTaskEngine.State().AddTask(&testTask)
 	dockerTaskEngine.State().AddContainer(
 		&api.DockerContainer{
-			DockerId:   container.ID,
+			DockerID:   container.ID,
 			DockerName: "gremlin",
 			Container:  containers[0],
 		},
 		&testTask)
-	statsEngine := NewDockerStatsEngine(&cfg, dockerClient)
+
+	// Create a new docker stats engine
+	statsEngine := NewDockerStatsEngine(&cfg, dockerClient, containerChangeEventStream)
 	err = statsEngine.MustInit(taskEngine, defaultCluster, defaultContainerInstance)
 	if err != nil {
-		t.Error("Error initializing stats engine: ", err)
+		t.Errorf("Error initializing stats engine: %v", err)
 	}
-	defer statsEngine.unsubscribeContainerEvents()
+	defer statsEngine.removeAll()
+	defer statsEngine.containerChangeEventStream.Unsubscribe(containerChangeHandler)
 
 	err = client.StartContainer(container.ID, nil)
 	defer client.StopContainer(container.ID, defaultDockerTimeoutSeconds)
 	if err != nil {
-		t.Error("Error starting container: ", container.ID, " error: ", err)
+		t.Errorf("Error starting container: %s, err: %v", container.ID, err)
 	}
 
 	err = client.StartContainer(unmappedContainer.ID, nil)
 	defer client.StopContainer(unmappedContainer.ID, defaultDockerTimeoutSeconds)
 	if err != nil {
-		t.Error("Error starting container: ", unmappedContainer.ID, " error: ", err)
+		t.Errorf("Error starting container: %s, err: %v", unmappedContainer.ID, err)
+	}
+
+	err = containerChangeEventStream.WriteToEventStream(ecsengine.DockerContainerChangeEvent{
+		Status: api.ContainerRunning,
+		DockerContainerMetadata: ecsengine.DockerContainerMetadata{
+			DockerID: container.ID,
+		},
+	})
+	if err != nil {
+		t.Errorf("Failed to write to container change event stream err: %v", err)
+	}
+
+	err = containerChangeEventStream.WriteToEventStream(ecsengine.DockerContainerChangeEvent{
+		Status: api.ContainerRunning,
+		DockerContainerMetadata: ecsengine.DockerContainerMetadata{
+			DockerID: unmappedContainer.ID,
+		},
+	})
+	if err != nil {
+		t.Errorf("Failed to write to container change event stream, err: %v", err)
 	}
 
 	// Wait for the stats collection go routine to start.
@@ -337,25 +329,34 @@ func TestStatsEngineWithDockerTaskEngine(t *testing.T) {
 
 	metadata, taskMetrics, err := statsEngine.GetInstanceMetrics()
 	if err != nil {
-		t.Error("Error gettting instance metrics: ", err)
+		t.Errorf("Error gettting instance metrics: %v", err)
 	}
 
 	if len(taskMetrics) != 1 {
-		t.Error("Incorrect number of tasks. Expected: 1, got: ", len(taskMetrics))
+		t.Errorf("Incorrect number of tasks. Expected: 1, got: %d", len(taskMetrics))
 	}
 	err = validateMetricsMetadata(metadata)
 	if err != nil {
-		t.Error("Error validating metadata: ", err)
+		t.Errorf("Error validating metadata: %v", err)
 	}
 
 	err = validateContainerMetrics(taskMetrics[0].ContainerMetrics, 1)
 	if err != nil {
-		t.Error("Error validating container metrics: ", err)
+		t.Errorf("Error validating container metrics: %v", err)
 	}
 
 	err = client.StopContainer(container.ID, defaultDockerTimeoutSeconds)
 	if err != nil {
-		t.Error("Error stopping container: ", container.ID, " error: ", err)
+		t.Errorf("Error stopping container: %s, err: %v", container.ID, err)
+	}
+	err = containerChangeEventStream.WriteToEventStream(ecsengine.DockerContainerChangeEvent{
+		Status: api.ContainerStopped,
+		DockerContainerMetadata: ecsengine.DockerContainerMetadata{
+			DockerID: container.ID,
+		},
+	})
+	if err != nil {
+		t.Errorf("Failed to write to container change event stream, err: %v", err)
 	}
 
 	time.Sleep(waitForCleanupSleep)
@@ -363,6 +364,97 @@ func TestStatsEngineWithDockerTaskEngine(t *testing.T) {
 	// Should not contain any metrics after cleanup.
 	err = validateIdleContainerMetrics(statsEngine)
 	if err != nil {
-		t.Fatal("Error validating idle metrics: ", err)
+		t.Fatalf("Error validating idle metrics: %v", err)
+	}
+}
+
+func TestStatsEngineWithDockerTaskEngineMissingRemoveEvent(t *testing.T) {
+	containerChangeEventStream := eventStream("TestStatsEngineWithDockerTaskEngineMissingRemoveEvent")
+	taskEngine := ecsengine.NewTaskEngine(&config.Config{}, nil, nil, containerChangeEventStream, nil, dockerstate.NewTaskEngineState())
+
+	container, err := createGremlin(client)
+	if err != nil {
+		t.Fatalf("Error creating container: %v", err)
+	}
+	defer client.RemoveContainer(docker.RemoveContainerOptions{
+		ID:    container.ID,
+		Force: true,
+	})
+	containers := []*api.Container{
+		{
+			Name:              "gremlin",
+			KnownStatusUnsafe: api.ContainerStopped,
+		},
+	}
+	testTask := api.Task{
+		Arn:                 "gremlin-task",
+		DesiredStatusUnsafe: api.TaskRunning,
+		KnownStatusUnsafe:   api.TaskRunning,
+		Family:              "test",
+		Version:             "1",
+		Containers:          containers,
+	}
+	// Populate Tasks and Container map in the engine.
+	dockerTaskEngine, _ := taskEngine.(*ecsengine.DockerTaskEngine)
+	dockerTaskEngine.State().AddTask(&testTask)
+	dockerTaskEngine.State().AddContainer(
+		&api.DockerContainer{
+			DockerID:   container.ID,
+			DockerName: "gremlin",
+			Container:  containers[0],
+		},
+		&testTask)
+
+	// Create a new docker stats engine
+	statsEngine := NewDockerStatsEngine(&cfg, dockerClient, containerChangeEventStream)
+	err = statsEngine.MustInit(taskEngine, defaultCluster, defaultContainerInstance)
+	if err != nil {
+		t.Errorf("Error initializing stats engine: %v", err)
+	}
+	defer statsEngine.removeAll()
+	defer statsEngine.containerChangeEventStream.Unsubscribe(containerChangeHandler)
+
+	err = client.StartContainer(container.ID, nil)
+	defer client.StopContainer(container.ID, defaultDockerTimeoutSeconds)
+	if err != nil {
+		t.Errorf("Error starting container: %s, err: %v", container.ID, err)
+	}
+
+	err = containerChangeEventStream.WriteToEventStream(ecsengine.DockerContainerChangeEvent{
+		Status: api.ContainerRunning,
+		DockerContainerMetadata: ecsengine.DockerContainerMetadata{
+			DockerID: container.ID,
+		},
+	})
+	if err != nil {
+		t.Errorf("Failed to write to container change event stream err: %v", err)
+	}
+
+	// Wait for the stats collection go routine to start.
+	time.Sleep(checkPointSleep)
+	err = client.StopContainer(container.ID, defaultDockerTimeoutSeconds)
+	if err != nil {
+		t.Fatalf("Error stopping container: %s, err: %v", container.ID, err)
+	}
+	err = client.RemoveContainer(docker.RemoveContainerOptions{
+		ID:    container.ID,
+		Force: true,
+	})
+	if err != nil {
+		t.Fatalf("Error removing container: %s, err: %v", container.ID, err)
+	}
+
+	time.Sleep(checkPointSleep)
+
+	// Simulate tcs client invoking GetInstanceMetrics.
+	_, _, err = statsEngine.GetInstanceMetrics()
+	if err == nil {
+		t.Fatalf("Expected error 'no task metrics tp report' when getting instance metrics")
+	}
+
+	// Should not contain any metrics after cleanup.
+	err = validateIdleContainerMetrics(statsEngine)
+	if err != nil {
+		t.Fatalf("Error validating idle metrics: %v", err)
 	}
 }

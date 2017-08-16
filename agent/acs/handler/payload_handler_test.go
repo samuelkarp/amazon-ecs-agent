@@ -22,11 +22,13 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/api/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	"github.com/aws/amazon-ecs-agent/agent/engine"
+	"github.com/aws/amazon-ecs-agent/agent/eventhandler"
 	"github.com/aws/amazon-ecs-agent/agent/statemanager"
 	"github.com/aws/amazon-ecs-agent/agent/statemanager/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/wsclient/mock"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/net/context"
 )
 
@@ -45,14 +47,25 @@ func TestHandlePayloadMessageWithNoMessageId(t *testing.T) {
 	ecsClient := mock_api.NewMockECSClient(ctrl)
 	stateManager := statemanager.NewNoopStateManager()
 	credentialsManager := credentials.NewManager()
+	taskHandler := eventhandler.NewTaskHandler()
 
 	ctx := context.Background()
-	buffer := newPayloadRequestHandler(ctx, taskEngine, ecsClient, clusterName, containerInstanceArn, nil, stateManager, refreshCredentialsHandler{}, credentialsManager)
+	buffer := newPayloadRequestHandler(
+		ctx,
+		taskEngine,
+		ecsClient,
+		clusterName,
+		containerInstanceArn,
+		nil,
+		stateManager,
+		refreshCredentialsHandler{},
+		credentialsManager,
+		taskHandler)
 
 	// test adding a payload message without the MessageId field
 	payloadMessage := &ecsacs.PayloadMessage{
 		Tasks: []*ecsacs.Task{
-			&ecsacs.Task{
+			{
 				Arn: aws.String("t1"),
 			},
 		},
@@ -81,17 +94,28 @@ func TestHandlePayloadMessageAddTaskError(t *testing.T) {
 	ecsClient := mock_api.NewMockECSClient(ctrl)
 	stateManager := statemanager.NewNoopStateManager()
 	credentialsManager := credentials.NewManager()
+	taskHandler := eventhandler.NewTaskHandler()
 
 	// Return error from AddTask
 	taskEngine.EXPECT().AddTask(gomock.Any()).Return(fmt.Errorf("oops")).Times(2)
 
 	ctx := context.Background()
-	buffer := newPayloadRequestHandler(ctx, taskEngine, ecsClient, clusterName, containerInstanceArn, nil, stateManager, refreshCredentialsHandler{}, credentialsManager)
+	buffer := newPayloadRequestHandler(
+		ctx,
+		taskEngine,
+		ecsClient,
+		clusterName,
+		containerInstanceArn,
+		nil,
+		stateManager,
+		refreshCredentialsHandler{},
+		credentialsManager,
+		taskHandler)
 
 	// Test AddTask error with RUNNING task
 	payloadMessage := &ecsacs.PayloadMessage{
 		Tasks: []*ecsacs.Task{
-			&ecsacs.Task{
+			{
 				Arn:           aws.String("t1"),
 				DesiredStatus: aws.String("RUNNING"),
 			},
@@ -105,7 +129,7 @@ func TestHandlePayloadMessageAddTaskError(t *testing.T) {
 
 	payloadMessage = &ecsacs.PayloadMessage{
 		Tasks: []*ecsacs.Task{
-			&ecsacs.Task{
+			{
 				Arn:           aws.String("t1"),
 				DesiredStatus: aws.String("STOPPED"),
 			},
@@ -126,6 +150,7 @@ func TestHandlePayloadMessageStateSaveError(t *testing.T) {
 	defer ctrl.Finish()
 	ecsClient := mock_api.NewMockECSClient(ctrl)
 	credentialsManager := credentials.NewManager()
+	taskHandler := eventhandler.NewTaskHandler()
 
 	taskEngine := engine.NewMockTaskEngine(ctrl)
 	// Save added task in the addedTask variable
@@ -139,12 +164,22 @@ func TestHandlePayloadMessageStateSaveError(t *testing.T) {
 	stateManager.EXPECT().Save().Return(fmt.Errorf("oops"))
 
 	ctx := context.Background()
-	buffer := newPayloadRequestHandler(ctx, taskEngine, ecsClient, clusterName, containerInstanceArn, nil, stateManager, refreshCredentialsHandler{}, credentialsManager)
+	buffer := newPayloadRequestHandler(
+		ctx,
+		taskEngine,
+		ecsClient,
+		clusterName,
+		containerInstanceArn,
+		nil,
+		stateManager,
+		refreshCredentialsHandler{},
+		credentialsManager,
+		taskHandler)
 
 	// Check if handleSingleMessage returns an error when state manager returns error on Save()
 	err := buffer.handleSingleMessage(&ecsacs.PayloadMessage{
 		Tasks: []*ecsacs.Task{
-			&ecsacs.Task{
+			{
 				Arn: aws.String("t1"),
 			},
 		},
@@ -171,6 +206,7 @@ func TestHandlePayloadMessageAckedWhenTaskAdded(t *testing.T) {
 	ecsClient := mock_api.NewMockECSClient(ctrl)
 	stateManager := statemanager.NewNoopStateManager()
 	credentialsManager := credentials.NewManager()
+	taskHandler := eventhandler.NewTaskHandler()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	taskEngine := engine.NewMockTaskEngine(ctrl)
@@ -185,13 +221,24 @@ func TestHandlePayloadMessageAckedWhenTaskAdded(t *testing.T) {
 		ackRequested = ackRequest
 		cancel()
 	}).Times(1)
-	buffer := newPayloadRequestHandler(ctx, taskEngine, ecsClient, clusterName, containerInstanceArn, mockWsClient, stateManager, refreshCredentialsHandler{}, credentialsManager)
+	buffer := newPayloadRequestHandler(
+		ctx,
+		taskEngine,
+		ecsClient,
+		clusterName,
+		containerInstanceArn,
+		mockWsClient,
+		stateManager,
+		refreshCredentialsHandler{},
+		credentialsManager,
+		taskHandler)
+
 	go buffer.start()
 
 	// Send a payload message
 	payloadMessage := &ecsacs.PayloadMessage{
 		Tasks: []*ecsacs.Task{
-			&ecsacs.Task{
+			{
 				Arn: aws.String("t1"),
 			},
 		},
@@ -230,6 +277,7 @@ func TestHandlePayloadMessageCredentialsAckedWhenTaskAdded(t *testing.T) {
 	stateManager := statemanager.NewNoopStateManager()
 	ctx, cancel := context.WithCancel(context.Background())
 	credentialsManager := credentials.NewManager()
+	taskHandler := eventhandler.NewTaskHandler()
 
 	taskEngine := engine.NewMockTaskEngine(ctrl)
 	var addedTask *api.Task
@@ -258,7 +306,18 @@ func TestHandlePayloadMessageCredentialsAckedWhenTaskAdded(t *testing.T) {
 	defer refreshCredsHandler.clearAcks()
 	refreshCredsHandler.start()
 
-	payloadHandler := newPayloadRequestHandler(ctx, taskEngine, ecsClient, clusterName, containerInstanceArn, mockWsClient, stateManager, refreshCredsHandler, credentialsManager)
+	payloadHandler := newPayloadRequestHandler(
+		ctx,
+		taskEngine,
+		ecsClient,
+		clusterName,
+		containerInstanceArn,
+		mockWsClient,
+		stateManager,
+		refreshCredsHandler,
+		credentialsManager,
+		taskHandler)
+
 	go payloadHandler.start()
 
 	taskArn := "t1"
@@ -272,7 +331,7 @@ func TestHandlePayloadMessageCredentialsAckedWhenTaskAdded(t *testing.T) {
 	// Send a payload message
 	payloadMessage := &ecsacs.PayloadMessage{
 		Tasks: []*ecsacs.Task{
-			&ecsacs.Task{
+			{
 				Arn: aws.String(taskArn),
 				RoleCredentials: &ecsacs.IAMRoleCredentials{
 					AccessKeyId:     aws.String(credentialsAccessKey),
@@ -311,12 +370,12 @@ func TestHandlePayloadMessageCredentialsAckedWhenTaskAdded(t *testing.T) {
 		CredentialsId: aws.String(credentialsId),
 	}
 	expectedCredentials := credentials.IAMRoleCredentials{
-		AccessKeyId:     credentialsAccessKey,
+		AccessKeyID:     credentialsAccessKey,
 		Expiration:      credentialsExpiration,
 		RoleArn:         credentialsRoleArn,
 		SecretAccessKey: credentialsSecretKey,
 		SessionToken:    credentialsSessionToken,
-		CredentialsId:   credentialsId,
+		CredentialsID:   credentialsId,
 	}
 	err = validateTaskAndCredentials(taskCredentialsAckRequested, expectedCredentialsAck, addedTask, taskArn, expectedCredentials)
 	if err != nil {
@@ -332,6 +391,7 @@ func TestAddPayloadTaskAddsNonStoppedTasksAfterStoppedTasks(t *testing.T) {
 	ecsClient := mock_api.NewMockECSClient(ctrl)
 	taskEngine := engine.NewMockTaskEngine(ctrl)
 	credentialsManager := credentials.NewManager()
+	taskHandler := eventhandler.NewTaskHandler()
 
 	var tasksAddedToEngine []*api.Task
 	taskEngine.EXPECT().AddTask(gomock.Any()).Do(func(task *api.Task) {
@@ -342,11 +402,11 @@ func TestAddPayloadTaskAddsNonStoppedTasksAfterStoppedTasks(t *testing.T) {
 	runningTaskArn := "runningTask"
 	payloadMessage := &ecsacs.PayloadMessage{
 		Tasks: []*ecsacs.Task{
-			&ecsacs.Task{
+			{
 				Arn:           aws.String(runningTaskArn),
 				DesiredStatus: aws.String("RUNNING"),
 			},
-			&ecsacs.Task{
+			{
 				Arn:           aws.String(stoppedTaskArn),
 				DesiredStatus: aws.String("STOPPED"),
 			},
@@ -356,31 +416,30 @@ func TestAddPayloadTaskAddsNonStoppedTasksAfterStoppedTasks(t *testing.T) {
 
 	ctx := context.Background()
 	stateManager := statemanager.NewNoopStateManager()
-	buffer := newPayloadRequestHandler(ctx, taskEngine, ecsClient, clusterName, containerInstanceArn, nil, stateManager, refreshCredentialsHandler{}, credentialsManager)
+	buffer := newPayloadRequestHandler(
+		ctx,
+		taskEngine,
+		ecsClient,
+		clusterName,
+		containerInstanceArn,
+		nil,
+		stateManager,
+		refreshCredentialsHandler{},
+		credentialsManager,
+		taskHandler)
+
 	_, ok := buffer.addPayloadTasks(payloadMessage)
-	if !ok {
-		t.Error("addPayloadTasks returned false")
-	}
-	if len(tasksAddedToEngine) != 2 {
-		t.Errorf("Incorrect number of tasks added to the engine. Expected: %d, got: %d", 2, len(tasksAddedToEngine))
-	}
+	assert.True(t, ok)
+	assert.Len(t, tasksAddedToEngine, 2)
 
 	// Verify if stopped task is added before running task
 	firstTaskAdded := tasksAddedToEngine[0]
-	if firstTaskAdded.Arn != stoppedTaskArn {
-		t.Errorf("Expected first task arn: %s, got: %s", stoppedTaskArn, firstTaskAdded.Arn)
-	}
-	if firstTaskAdded.DesiredStatus != api.TaskStopped {
-		t.Errorf("Expected first task state be be: %s , got: %s", "STOPPED", firstTaskAdded.DesiredStatus.String())
-	}
+	assert.Equal(t, firstTaskAdded.Arn, stoppedTaskArn)
+	assert.Equal(t, firstTaskAdded.GetDesiredStatus(), api.TaskStopped)
 
 	secondTaskAdded := tasksAddedToEngine[1]
-	if secondTaskAdded.Arn != runningTaskArn {
-		t.Errorf("Expected second task arn: %s, got: %s", runningTaskArn, secondTaskAdded.Arn)
-	}
-	if secondTaskAdded.DesiredStatus != api.TaskRunning {
-		t.Errorf("Expected second task state be be: %s , got: %s", "RUNNNING", secondTaskAdded.DesiredStatus.String())
-	}
+	assert.Equal(t, secondTaskAdded.Arn, runningTaskArn)
+	assert.Equal(t, secondTaskAdded.GetDesiredStatus(), api.TaskRunning)
 }
 
 // TestPayloadBufferHandler tests if the async payloadBufferHandler routine
@@ -392,6 +451,7 @@ func TestPayloadBufferHandler(t *testing.T) {
 	ecsClient := mock_api.NewMockECSClient(ctrl)
 	stateManager := statemanager.NewNoopStateManager()
 	credentialsManager := credentials.NewManager()
+	taskHandler := eventhandler.NewTaskHandler()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var addedTask *api.Task
@@ -406,13 +466,24 @@ func TestPayloadBufferHandler(t *testing.T) {
 		cancel()
 	}).Times(1)
 
-	buffer := newPayloadRequestHandler(ctx, taskEngine, ecsClient, clusterName, containerInstanceArn, mockWsClient, stateManager, refreshCredentialsHandler{}, credentialsManager)
+	buffer := newPayloadRequestHandler(
+		ctx,
+		taskEngine,
+		ecsClient,
+		clusterName,
+		containerInstanceArn,
+		mockWsClient,
+		stateManager,
+		refreshCredentialsHandler{},
+		credentialsManager,
+		taskHandler)
+
 	go buffer.start()
 	// Send a payload message to the payloadBufferChannel
 	taskArn := "t1"
 	buffer.messageBuffer <- &ecsacs.PayloadMessage{
 		Tasks: []*ecsacs.Task{
-			&ecsacs.Task{
+			{
 				Arn: aws.String(taskArn),
 			},
 		},
@@ -446,6 +517,7 @@ func TestPayloadBufferHandlerWithCredentials(t *testing.T) {
 	stateManager := statemanager.NewNoopStateManager()
 	ctx, cancel := context.WithCancel(context.Background())
 	credentialsManager := credentials.NewManager()
+	taskHandler := eventhandler.NewTaskHandler()
 
 	// The payload message in the test consists of two tasks, record both of them in
 	// the order in which they were added
@@ -485,7 +557,18 @@ func TestPayloadBufferHandlerWithCredentials(t *testing.T) {
 	refreshCredsHandler := newRefreshCredentialsHandler(ctx, clusterName, containerInstanceArn, mockWsClient, credentialsManager, taskEngine)
 	defer refreshCredsHandler.clearAcks()
 	refreshCredsHandler.start()
-	payloadHandler := newPayloadRequestHandler(ctx, taskEngine, ecsClient, clusterName, containerInstanceArn, mockWsClient, stateManager, refreshCredsHandler, credentialsManager)
+	payloadHandler := newPayloadRequestHandler(
+		ctx,
+		taskEngine,
+		ecsClient,
+		clusterName,
+		containerInstanceArn,
+		mockWsClient,
+		stateManager,
+		refreshCredsHandler,
+		credentialsManager,
+		taskHandler)
+
 	go payloadHandler.start()
 
 	firstTaskArn := "t1"
@@ -507,7 +590,7 @@ func TestPayloadBufferHandlerWithCredentials(t *testing.T) {
 	// Send a payload message to the payloadBufferChannel
 	payloadHandler.messageBuffer <- &ecsacs.PayloadMessage{
 		Tasks: []*ecsacs.Task{
-			&ecsacs.Task{
+			{
 				Arn: aws.String(firstTaskArn),
 				RoleCredentials: &ecsacs.IAMRoleCredentials{
 					AccessKeyId:     aws.String(firstTaskCredentialsAccessKey),
@@ -518,7 +601,7 @@ func TestPayloadBufferHandlerWithCredentials(t *testing.T) {
 					CredentialsId:   aws.String(firstTaskCredentialsId),
 				},
 			},
-			&ecsacs.Task{
+			{
 				Arn: aws.String(secondTaskArn),
 				RoleCredentials: &ecsacs.IAMRoleCredentials{
 					AccessKeyId:     aws.String(secondTaskCredentialsAccessKey),
@@ -553,12 +636,12 @@ func TestPayloadBufferHandlerWithCredentials(t *testing.T) {
 		CredentialsId: aws.String(firstTaskCredentialsId),
 	}
 	expectedCredentialsForFirstTask := credentials.IAMRoleCredentials{
-		AccessKeyId:     firstTaskCredentialsAccessKey,
+		AccessKeyID:     firstTaskCredentialsAccessKey,
 		Expiration:      firstTaskCredentialsExpiration,
 		RoleArn:         firstTaskCredentialsRoleArn,
 		SecretAccessKey: firstTaskCredentialsSecretKey,
 		SessionToken:    firstTaskCredentialsSessionToken,
-		CredentialsId:   firstTaskCredentialsId,
+		CredentialsID:   firstTaskCredentialsId,
 	}
 	err := validateTaskAndCredentials(firstTaskCredentialsAckRequested, expectedCredentialsAckForFirstTask, firstAddedTask, firstTaskArn, expectedCredentialsForFirstTask)
 	if err != nil {
@@ -573,12 +656,12 @@ func TestPayloadBufferHandlerWithCredentials(t *testing.T) {
 		CredentialsId: aws.String(secondTaskCredentialsId),
 	}
 	expectedCredentialsForSecondTask := credentials.IAMRoleCredentials{
-		AccessKeyId:     secondTaskCredentialsAccessKey,
+		AccessKeyID:     secondTaskCredentialsAccessKey,
 		Expiration:      secondTaskCredentialsExpiration,
 		RoleArn:         secondTaskCredentialsRoleArn,
 		SecretAccessKey: secondTaskCredentialsSecretKey,
 		SessionToken:    secondTaskCredentialsSessionToken,
-		CredentialsId:   secondTaskCredentialsId,
+		CredentialsID:   secondTaskCredentialsId,
 	}
 	err = validateTaskAndCredentials(secondTaskCredentialsAckRequested, expectedCredentialsAckForSecondTask, secondAddedTask, secondTaskArn, expectedCredentialsForSecondTask)
 	if err != nil {
@@ -597,7 +680,7 @@ func validateTaskAndCredentials(taskCredentialsAck, expectedCredentialsAckForTas
 	expectedTask := &api.Task{
 		Arn: expectedTaskArn,
 	}
-	expectedTask.SetCredentialsId(expectedTaskCredentials.CredentialsId)
+	expectedTask.SetCredentialsID(expectedTaskCredentials.CredentialsID)
 
 	if !reflect.DeepEqual(addedTask, expectedTask) {
 		return fmt.Errorf("Mismatch between expected and added tasks, expected: %v, added: %v", expectedTask, addedTask)

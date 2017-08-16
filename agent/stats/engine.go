@@ -1,4 +1,4 @@
-// Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -13,25 +13,31 @@
 
 package stats
 
-//go:generate mockgen.sh github.com/aws/amazon-ecs-agent/agent/stats Engine mock/$GOFILE
+//go:generate go run ../../scripts/generate/mockgen.go github.com/aws/amazon-ecs-agent/agent/stats Engine mock/$GOFILE
 
 import (
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 
+	"github.com/cihub/seelog"
 	"github.com/pborman/uuid"
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	ecsengine "github.com/aws/amazon-ecs-agent/agent/engine"
-	"github.com/aws/amazon-ecs-agent/agent/logger"
+	"github.com/aws/amazon-ecs-agent/agent/eventstream"
 	"github.com/aws/amazon-ecs-agent/agent/stats/resolver"
 	"github.com/aws/amazon-ecs-agent/agent/tcs/model/ecstcs"
 	"github.com/aws/aws-sdk-go/aws"
-	"golang.org/x/net/context"
 )
 
-var log = logger.ForModule("stats")
+const (
+	containerChangeHandler = "DockerStatsEngineDockerEventsHandler"
+	listContainersTimeout  = 10 * time.Minute
+	queueResetThreshold    = 2 * ecsengine.StatsInactivityTimeout
+)
 
 // DockerContainerMetadataResolver implements ContainerMetadataResolver for
 // DockerTaskEngine.
@@ -48,54 +54,61 @@ type Engine interface {
 // DockerStatsEngine is used to monitor docker container events and to report
 // utlization metrics of the same.
 type DockerStatsEngine struct {
-	client               ecsengine.DockerClient
-	cluster              string
-	containerInstanceArn string
-	containersLock       sync.RWMutex
-	ctx                  context.Context
-	events               <-chan ecsengine.DockerContainerChangeEvent
-	resolver             resolver.ContainerMetadataResolver
+	client                     ecsengine.DockerClient
+	cluster                    string
+	containerInstanceArn       string
+	containersLock             sync.RWMutex
+	containerChangeEventStream *eventstream.EventStream
+	resolver                   resolver.ContainerMetadataResolver
 	// tasksToContainers maps task arns to a map of container ids to StatsContainer objects.
 	tasksToContainers map[string]map[string]*StatsContainer
 	// tasksToDefinitions maps task arns to task definiton name and family metadata objects.
-	tasksToDefinitions         map[string]*taskDefinition
-	unsubscribeContainerEvents context.CancelFunc
+	tasksToDefinitions map[string]*taskDefinition
 }
 
-// dockerStatsEngine is a singleton object of DockerStatsEngine.
-var dockerStatsEngine *DockerStatsEngine
+var EmptyMetricsError = errors.New("No task metrics to report")
 
-// ResolveTask resolves the task arn, given container id.
+// ResolveTask resolves the api task object, given container id.
 func (resolver *DockerContainerMetadataResolver) ResolveTask(dockerID string) (*api.Task, error) {
 	if resolver.dockerTaskEngine == nil {
 		return nil, fmt.Errorf("Docker task engine uninitialized")
 	}
-	task, found := resolver.dockerTaskEngine.State().TaskById(dockerID)
+	task, found := resolver.dockerTaskEngine.State().TaskByID(dockerID)
 	if !found {
-		return nil, fmt.Errorf("Could not map docker id to task")
+		return nil, fmt.Errorf("Could not map docker id to task: %s", dockerID)
 	}
 
 	return task, nil
 }
 
-// NewDockerStatsEngine creates a new instance of the DockerStatsEngine object.
-// MustInit() must be called to initialize the fields of the new event listener.
-func NewDockerStatsEngine(cfg *config.Config, client ecsengine.DockerClient) *DockerStatsEngine {
-	if dockerStatsEngine == nil {
-		dockerStatsEngine = &DockerStatsEngine{
-			client:             client,
-			resolver:           nil,
-			tasksToContainers:  make(map[string]map[string]*StatsContainer),
-			tasksToDefinitions: make(map[string]*taskDefinition),
-		}
+// ResolveContainer resolves the api container object, given container id.
+func (resolver *DockerContainerMetadataResolver) ResolveContainer(dockerID string) (*api.DockerContainer, error) {
+	if resolver.dockerTaskEngine == nil {
+		return nil, fmt.Errorf("Docker task engine uninitialized")
+	}
+	container, found := resolver.dockerTaskEngine.State().ContainerByID(dockerID)
+	if !found {
+		return nil, fmt.Errorf("Could not map docker id to container: %s", dockerID)
 	}
 
-	return dockerStatsEngine
+	return container, nil
+}
+
+// NewDockerStatsEngine creates a new instance of the DockerStatsEngine object.
+// MustInit() must be called to initialize the fields of the new event listener.
+func NewDockerStatsEngine(cfg *config.Config, client ecsengine.DockerClient, containerChangeEventStream *eventstream.EventStream) *DockerStatsEngine {
+	return &DockerStatsEngine{
+		client:                     client,
+		resolver:                   nil,
+		tasksToContainers:          make(map[string]map[string]*StatsContainer),
+		tasksToDefinitions:         make(map[string]*taskDefinition),
+		containerChangeEventStream: containerChangeEventStream,
+	}
 }
 
 // MustInit initializes fields of the DockerStatsEngine object.
 func (engine *DockerStatsEngine) MustInit(taskEngine ecsengine.TaskEngine, cluster string, containerInstanceArn string) error {
-	log.Info("Initializing stats engine")
+	seelog.Info("Initializing stats engine")
 	engine.cluster = cluster
 	engine.containerInstanceArn = containerInstanceArn
 
@@ -108,17 +121,40 @@ func (engine *DockerStatsEngine) MustInit(taskEngine ecsengine.TaskEngine, clust
 	return engine.Init()
 }
 
-// Init initializes the docker client's event engine. This must be called
-// to subscribe to the docker's event stream.
+// Init subscribes to the container change event stream.
 func (engine *DockerStatsEngine) Init() error {
-	engine.ctx, engine.unsubscribeContainerEvents = context.WithCancel(context.TODO())
-	err := engine.openEventStream()
+	// Subscribe to the container change event stream
+	err := engine.containerChangeEventStream.Subscribe(containerChangeHandler, engine.handleDockerEvents)
 	if err != nil {
-		return err
+		return fmt.Errorf("Failed to subscribe to container change event stream, err %v", err)
 	}
 
 	go engine.listContainersAndStartEventHandler()
+	go engine.waitToStop()
+
 	return nil
+}
+
+// waitToStop waits for the container change event stream close ans stop collection metrics
+func (engine *DockerStatsEngine) waitToStop() {
+	// Waiting for the event stream to close
+	ctx := engine.containerChangeEventStream.Context()
+	select {
+	case <-ctx.Done():
+		seelog.Debug("Event stream closed, stop listening to the event stream")
+		engine.containerChangeEventStream.Unsubscribe(containerChangeHandler)
+		engine.removeAll()
+	}
+}
+
+// removeAll stops the periodic usage data collection for all containers
+func (engine *DockerStatsEngine) removeAll() {
+	for task, containers := range engine.tasksToContainers {
+		for _, statsContainer := range containers {
+			statsContainer.StopStatsCollection()
+		}
+		delete(engine.tasksToContainers, task)
+	}
 }
 
 // listContainersAndStartEventHandler adds existing containers to the watch-list
@@ -127,22 +163,19 @@ func (engine *DockerStatsEngine) listContainersAndStartEventHandler() {
 	// List and add existing containers to the list of containers to watch.
 	err := engine.addExistingContainers()
 	if err != nil {
-		log.Warn("Error listing existing containers", "err", err)
-		// Cancel the context to unsubscribe container events.
-		engine.unsubscribeContainerEvents()
+		seelog.Warnf("Error listing existing containers, err: %v", err)
 		return
 	}
-	go engine.handleDockerEvents()
 }
 
 // addExistingContainers lists existing containers and adds them to the engine.
 func (engine *DockerStatsEngine) addExistingContainers() error {
-	listContainersResponse := engine.client.ListContainers(false)
+	listContainersResponse := engine.client.ListContainers(false, ecsengine.ListContainersTimeout)
 	if listContainersResponse.Error != nil {
 		return listContainersResponse.Error
 	}
 
-	for _, containerID := range listContainersResponse.DockerIds {
+	for _, containerID := range listContainersResponse.DockerIDs {
 		engine.addContainer(containerID)
 	}
 
@@ -161,7 +194,7 @@ func (engine *DockerStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, 
 	}
 
 	if idle {
-		log.Debug("Instance is idle. No task metrics to report")
+		seelog.Debug("Instance is idle. No task metrics to report")
 		fin := true
 		metricsMetadata.Fin = &fin
 		return metricsMetadata, taskMetrics, nil
@@ -170,18 +203,18 @@ func (engine *DockerStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, 
 	for taskArn := range engine.tasksToContainers {
 		containerMetrics, err := engine.getContainerMetricsForTask(taskArn)
 		if err != nil {
-			log.Debug("Error getting container metrics for task", "err", err, "task", taskArn)
+			seelog.Debugf("Error getting container metrics for task: %s, err: %v", taskArn, err)
 			continue
 		}
 
 		if len(containerMetrics) == 0 {
-			log.Debug("Empty containerMetrics for task, ignoring", "task", taskArn)
+			seelog.Debugf("Empty containerMetrics for task, ignoring, task: %s", taskArn)
 			continue
 		}
 
 		taskDef, exists := engine.tasksToDefinitions[taskArn]
 		if !exists {
-			log.Debug("Could not map task to definition", "task", taskArn)
+			seelog.Debugf("Could not map task to definition, task: %s", taskArn)
 			continue
 		}
 
@@ -197,7 +230,7 @@ func (engine *DockerStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, 
 
 	if len(taskMetrics) == 0 {
 		// Not idle. Expect taskMetrics to be there.
-		return nil, nil, fmt.Errorf("No task metrics to report")
+		return nil, nil, EmptyMetricsError
 	}
 
 	// Reset current stats. Retaining older stats results in incorrect utilization stats
@@ -207,43 +240,32 @@ func (engine *DockerStatsEngine) GetInstanceMetrics() (*ecstcs.MetricsMetadata, 
 }
 
 func (engine *DockerStatsEngine) isIdle() bool {
-	return len(engine.tasksToContainers) == 0
-}
+	engine.containersLock.RLock()
+	defer engine.containersLock.RUnlock()
 
-// openEventStream initializes the channel to receive events from docker client's
-// event stream.
-func (engine *DockerStatsEngine) openEventStream() error {
-	events, err := engine.client.ContainerEvents(engine.ctx)
-	if err != nil {
-		return err
-	}
-	engine.events = events
-	return nil
+	return len(engine.tasksToContainers) == 0
 }
 
 // handleDockerEvents must be called after openEventstream; it processes each
 // event that it reads from the docker event stream.
-func (engine *DockerStatsEngine) handleDockerEvents() {
-	for {
-		select {
-		case <-engine.ctx.Done():
-			return
-		case event, ok := <-engine.events:
-			if !ok {
-				log.Crit("Docker event stream closed unexpectedly")
-				return
-			}
-			log.Debug("Handling an event: ", "container", event.DockerId, "status", event.Status.String())
-			switch event.Status {
-			case api.ContainerRunning:
-				engine.addContainer(event.DockerId)
-			case api.ContainerStopped:
-				engine.removeContainer(event.DockerId)
-			default:
-				log.Debug("Ignoring event for container", "id", event.DockerId, "status", event.Status)
-			}
+func (engine *DockerStatsEngine) handleDockerEvents(events ...interface{}) error {
+	for _, event := range events {
+		dockerContainerChangeEvent, ok := event.(ecsengine.DockerContainerChangeEvent)
+		if !ok {
+			return fmt.Errorf("Unexpected event received, expected docker container change event")
+		}
+
+		switch dockerContainerChangeEvent.Status {
+		case api.ContainerRunning:
+			engine.addContainer(dockerContainerChangeEvent.DockerID)
+		case api.ContainerStopped:
+			engine.removeContainer(dockerContainerChangeEvent.DockerID)
+		default:
+			seelog.Debugf("Ignoring event for container, id: %s, status: %d", dockerContainerChangeEvent.DockerID, dockerContainerChangeEvent.Status)
 		}
 	}
+
+	return nil
 }
 
 // addContainer adds a container to the map of containers being watched.
@@ -256,22 +278,22 @@ func (engine *DockerStatsEngine) addContainer(dockerID string) {
 	// is not terminal.
 	task, err := engine.resolver.ResolveTask(dockerID)
 	if err != nil {
-		log.Debug("Could not map container to task, ignoring", "err", err, "id", dockerID)
+		seelog.Debugf("Could not map container to task, ignoring, err: %v, id: %s", err, dockerID)
 		return
 	}
 
 	if len(task.Arn) == 0 || len(task.Family) == 0 {
-		log.Debug("Task has invalid fields", "id", dockerID)
+		seelog.Debugf("Task has invalid fields, id: %s", dockerID)
 		return
 	}
 
 	if task.GetKnownStatus().Terminal() {
-		log.Debug("Task is terminal, ignoring", "id", dockerID)
+		seelog.Debugf("Task is terminal, ignoring, id: %s", dockerID)
 		return
 	}
 
 	if err != nil {
-		log.Debug("Could not get name for container, ignoring", "err", err, "id", dockerID)
+		seelog.Debugf("Could not get name for container, ignoring, err: %v, id: %s", err, dockerID)
 		return
 	}
 
@@ -282,7 +304,7 @@ func (engine *DockerStatsEngine) addContainer(dockerID string) {
 		_, containerExists := engine.tasksToContainers[task.Arn][dockerID]
 		if containerExists {
 			// container arn exists in map.
-			log.Debug("Container already being watched, ignoring", "id", dockerID)
+			seelog.Debugf("Container already being watched, ignoring, id: %s", dockerID)
 			return
 		}
 	} else {
@@ -290,8 +312,8 @@ func (engine *DockerStatsEngine) addContainer(dockerID string) {
 		engine.tasksToContainers[task.Arn] = make(map[string]*StatsContainer)
 	}
 
-	log.Debug("Adding container to stats watch list", "id", dockerID, "task", task.Arn)
-	container := newStatsContainer(dockerID, engine.client)
+	seelog.Debugf("Adding container to stats watch list, id: %s, task: %s", dockerID, task.Arn)
+	container := newStatsContainer(dockerID, engine.client, engine.resolver)
 	engine.tasksToContainers[task.Arn][dockerID] = container
 	engine.tasksToDefinitions[task.Arn] = &taskDefinition{family: task.Family, version: task.Version}
 	container.StartStatsCollection()
@@ -306,13 +328,13 @@ func (engine *DockerStatsEngine) removeContainer(dockerID string) {
 	// Make sure that this container belongs to a task.
 	task, err := engine.resolver.ResolveTask(dockerID)
 	if err != nil {
-		log.Debug("Could not map container to task, ignoring", "err", err, "id", dockerID)
+		seelog.Debugf("Could not map container to task, ignoring, err: %v, id: %s", err, dockerID)
 		return
 	}
 
 	_, taskExists := engine.tasksToContainers[task.Arn]
 	if !taskExists {
-		log.Debug("Container not being watched", "id", dockerID)
+		seelog.Debugf("Container not being watched, id: %s", dockerID)
 		return
 	}
 
@@ -320,22 +342,11 @@ func (engine *DockerStatsEngine) removeContainer(dockerID string) {
 	container, containerExists := engine.tasksToContainers[task.Arn][dockerID]
 	if !containerExists {
 		// container arn does not exist in map.
-		log.Debug("Container not being watched", "id", dockerID)
+		seelog.Debugf("Container not being watched, id: %s", dockerID)
 		return
 	}
 
-	container.StopStatsCollection()
-	delete(engine.tasksToContainers[task.Arn], dockerID)
-	log.Debug("Deleted container from tasks", "id", dockerID)
-
-	if len(engine.tasksToContainers[task.Arn]) == 0 {
-		// No containers in task, delete task arn from map.
-		delete(engine.tasksToContainers, task.Arn)
-		// No need to verify if the key exists in tasksToDefinitions.
-		// Delete will do nothing if the specified key doesn't exist.
-		delete(engine.tasksToDefinitions, task.Arn)
-		log.Debug("Deleted task from tasks", "arn", task.Arn)
-	}
+	engine.doRemoveContainer(container, task.Arn)
 }
 
 // newDockerContainerMetadataResolver returns a new instance of DockerContainerMetadataResolver.
@@ -365,17 +376,45 @@ func (engine *DockerStatsEngine) getContainerMetricsForTask(taskArn string) ([]*
 
 	var containerMetrics []*ecstcs.ContainerMetric
 	for _, container := range containerMap {
-		// Get CPU stats set.
+		dockerID := container.containerMetadata.DockerID
+		// Check if the container is terminal. If it is, make sure that it is
+		// cleaned up properly. We might sometimes miss events from docker task
+		// engine and this helps in reconciling the state. The tcs client's
+		// GetInstanceMetrics probe is used as the trigger for this.
+		terminal, err := container.terminal()
+		if err != nil {
+			// Error determining if the container is terminal. This means that the container
+			// id could not be resolved to a container that is being tracked by the
+			// docker task engine. If the docker task engine has already removed
+			// the container from its state, there's no point in stats engine tracking the
+			// container. So, clean-up anyway.
+			seelog.Warnf("Error determining if the container %s is terminal, cleaning up and skipping", dockerID, err)
+			engine.doRemoveContainer(container, taskArn)
+			continue
+		} else if terminal {
+			// Container is in knonwn terminal state. Stop collection metrics.
+			seelog.Infof("Container %s is terminal, cleaning up and skipping", dockerID)
+			engine.doRemoveContainer(container, taskArn)
+			continue
+		}
+
+		if !container.statsQueue.enoughDatapointsInBuffer() &&
+			!container.statsQueue.resetThresholdElapsed(queueResetThreshold) {
+			seelog.Debugf("Stats not ready for container %s", dockerID)
+			continue
+		}
+
+		// Container is not terminal. Get CPU stats set.
 		cpuStatsSet, err := container.statsQueue.GetCPUStatsSet()
 		if err != nil {
-			log.Warn("Error getting cpu stats", "err", err, "container", container.containerMetadata)
+			seelog.Warnf("Error getting cpu stats, err: %v, container: %v", err, dockerID)
 			continue
 		}
 
 		// Get memory stats set.
 		memoryStatsSet, err := container.statsQueue.GetMemoryStatsSet()
 		if err != nil {
-			log.Warn("Error getting memory stats", "err", err, "container", container.containerMetadata)
+			seelog.Warnf("Error getting memory stats, err: %v, container: %v", err, dockerID)
 			continue
 		}
 
@@ -387,6 +426,22 @@ func (engine *DockerStatsEngine) getContainerMetricsForTask(taskArn string) ([]*
 	}
 
 	return containerMetrics, nil
+}
+
+func (engine *DockerStatsEngine) doRemoveContainer(container *StatsContainer, taskArn string) {
+	container.StopStatsCollection()
+	dockerID := container.containerMetadata.DockerID
+	delete(engine.tasksToContainers[taskArn], dockerID)
+	seelog.Debugf("Deleted container from tasks, id: %s", dockerID)
+
+	if len(engine.tasksToContainers[taskArn]) == 0 {
+		// No containers in task, delete task arn from map.
+		delete(engine.tasksToContainers, taskArn)
+		// No need to verify if the key exists in tasksToDefinitions.
+		// Delete will do nothing if the specified key doesn't exist.
+		delete(engine.tasksToDefinitions, taskArn)
+		seelog.Debugf("Deleted task from tasks, arn: %s", taskArn)
+	}
 }
 
 // resetStats resets stats for all watched containers.

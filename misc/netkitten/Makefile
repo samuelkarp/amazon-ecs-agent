@@ -1,4 +1,4 @@
-# Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"). You may
 # not use this file except in compliance with the License. A copy of the
@@ -15,7 +15,7 @@
 all: netkitten image
 
 netkitten:
-	docker run -v $(shell pwd):/out -v $(shell pwd)/netkitten.go:/in/netkitten.go -e CGO_ENABLED=0 golang:1.6 go build -a -installsuffix cgo -ldflags '-s' -o /out/netkitten /in/netkitten.go
+	docker run -v $(shell pwd):/out -v $(shell pwd)/netkitten.go:/in/netkitten.go -e CGO_ENABLED=0 golang:1.7 go build -a -installsuffix cgo -ldflags '-s' -o /out/netkitten /in/netkitten.go
 
 image: netkitten
 	@./docker-image
@@ -23,4 +23,4 @@ image: netkitten
 
 clean:
 	rm -f netkitten
-	docker rmi "amazon/amazon-ecs-netkitten:make"
+	-docker rmi "amazon/amazon-ecs-netkitten:make"

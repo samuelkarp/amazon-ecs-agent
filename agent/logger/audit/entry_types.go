@@ -15,14 +15,29 @@ package audit
 
 import (
 	"fmt"
-	"net/http"
+	"strings"
 	"time"
 
+	"github.com/aws/amazon-ecs-agent/agent/credentials"
+	"github.com/aws/amazon-ecs-agent/agent/logger/audit/request"
 	log "github.com/cihub/seelog"
 )
 
 const (
-	getCredentialsEventType       = "GetCredentials"
+	getCredentialsEventType = "GetCredentials"
+
+	// getCredentialsAuditLogVersion is the version of the audit log
+	// For version '1', the fields are:
+	// 1. event time
+	// 2. response code
+	// 3. source ip address
+	// 4. url
+	// 5. user agent
+	// 6. arn for the entity associated with credentials
+	// 7. event type ('GetCredentials')
+	// 8. version
+	// 9. cluster
+	// 10. container instance arn
 	getCredentialsAuditLogVersion = 1
 )
 
@@ -32,14 +47,16 @@ type commonAuditLogEntryFields struct {
 	srcAddr      string
 	theURL       string
 	userAgent    string
+	arn          string
 }
 
+// GetCredentialsEventType is the type for a GetCredentials request
 func GetCredentialsEventType() string {
 	return getCredentialsEventType
 }
 
 func (c *commonAuditLogEntryFields) string() string {
-	return fmt.Sprintf("%s %d %s %s %s", c.eventTime, c.responseCode, c.srcAddr, c.theURL, c.userAgent)
+	return fmt.Sprintf("%s %d %s %s %s %s", c.eventTime, c.responseCode, c.srcAddr, c.theURL, c.userAgent, c.arn)
 }
 
 type getCredentialsAuditLogEntryFields struct {
@@ -53,13 +70,20 @@ func (g *getCredentialsAuditLogEntryFields) string() string {
 	return fmt.Sprintf("%s %d %s %s", g.eventType, g.version, g.cluster, g.containerInstanceArn)
 }
 
-func constructCommonAuditLogEntryFields(r *http.Request, httpResponseCode int) string {
+func constructCommonAuditLogEntryFields(r request.LogRequest, httpResponseCode int) string {
+	httpRequest := r.Request
+	url := httpRequest.URL.Path
+	// V2CredentialsPath contains the credentials ID, which should not be logged
+	if strings.HasPrefix(url, credentials.V2CredentialsPath+"/") {
+		url = credentials.V2CredentialsPath
+	}
 	fields := &commonAuditLogEntryFields{
 		eventTime:    time.Now().UTC().Format(time.RFC3339),
 		responseCode: httpResponseCode,
-		srcAddr:      populateField(r.RemoteAddr),
-		theURL:       populateField(fmt.Sprintf(`"%s"`, r.URL.Path)),
-		userAgent:    populateField(fmt.Sprintf(`"%s"`, r.UserAgent())),
+		srcAddr:      populateField(httpRequest.RemoteAddr),
+		theURL:       populateField(fmt.Sprintf(`"%s"`, url)),
+		userAgent:    populateField(fmt.Sprintf(`"%s"`, httpRequest.UserAgent())),
+		arn:          populateField(r.ARN),
 	}
 	return fields.string()
 }

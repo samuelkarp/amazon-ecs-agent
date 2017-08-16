@@ -1,4 +1,4 @@
-# Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright 2014-2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"). You may
 # not use this file except in compliance with the License. A copy of the
@@ -32,9 +32,9 @@ RUN apt-get update && apt-get install -y \
 		--no-install-recommends \
 	&& rm -rf /var/lib/apt/lists/*
 
-ENV GOLANG_VERSION 1.6.2
+ENV GOLANG_VERSION 1.7.4
 ENV GOLANG_DOWNLOAD_URL https://golang.org/dl/go$GOLANG_VERSION.linux-amd64.tar.gz
-ENV GOLANG_DOWNLOAD_SHA256 e40c36ae71756198478624ed1bb4ce17597b3c19d243f3f0899bb5740d56212a
+ENV GOLANG_DOWNLOAD_SHA256 47fda42e46b4c3ec93fa5d4d4cc6a748aa3f9411a2a2b7e08e3a6d80d753ec8b
 
 RUN curl -fsSL "$GOLANG_DOWNLOAD_URL" -o golang.tar.gz \
   && echo "$GOLANG_DOWNLOAD_SHA256  golang.tar.gz" | sha256sum -c - \
@@ -48,7 +48,6 @@ ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
 RUN mkdir -p "$GOPATH/src" "$GOPATH/bin" && chmod -R 777 "$GOPATH"
 WORKDIR $GOPATH
 
-COPY go-wrapper /usr/local/bin/
 # End docker-library/golang sourced data
 
 # Once https://github.com/docker/docker/issues/735 is resolved, this and

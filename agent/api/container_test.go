@@ -1,4 +1,4 @@
-// Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2014-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -23,17 +23,17 @@ import (
 
 func TestOverridden(t *testing.T) {
 	container := &Container{
-		Name:          "name",
-		Image:         "image",
-		Command:       []string{"foo", "bar"},
-		Cpu:           1,
-		Memory:        1,
-		Links:         []string{},
-		Ports:         []PortBinding{PortBinding{10, 10, "", TransportProtocolTCP}},
-		Overrides:     ContainerOverrides{},
-		DesiredStatus: ContainerRunning,
-		AppliedStatus: ContainerRunning,
-		KnownStatus:   ContainerRunning,
+		Name:                "name",
+		Image:               "image",
+		Command:             []string{"foo", "bar"},
+		CPU:                 1,
+		Memory:              1,
+		Links:               []string{},
+		Ports:               []PortBinding{{10, 10, "", TransportProtocolTCP}},
+		Overrides:           ContainerOverrides{},
+		DesiredStatusUnsafe: ContainerRunning,
+		AppliedStatus:       ContainerRunning,
+		KnownStatusUnsafe:   ContainerRunning,
 	}
 
 	overridden := container.Overridden()
@@ -63,7 +63,7 @@ func (pair configPair) Equal() bool {
 	if (conf.Memory / 1024 / 1024) != int64(cont.Memory) {
 		return false
 	}
-	if conf.CPUShares != int64(cont.Cpu) {
+	if conf.CPUShares != int64(cont.CPU) {
 		return false
 	}
 	if conf.Image != cont.Image {

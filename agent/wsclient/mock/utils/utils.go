@@ -1,4 +1,4 @@
-// Copyright 2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2015-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License"). You may
 // not use this file except in compliance with the License. A copy of the
@@ -11,7 +11,7 @@
 // express or implied. See the License for the specific language governing
 // permissions and limitations under the License.
 
-package mockwsutils
+package utils
 
 import (
 	"net/http"
@@ -22,28 +22,37 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// StartMockServer starts a mock websocket server.
-func StartMockServer(t *testing.T, closeWS <-chan bool) (*httptest.Server, chan<- string, <-chan string, <-chan error, error) {
+// GetMockServer retuns a mock websocket server that can be started up as TLS or not.
+// TODO replace with gomock
+func GetMockServer(t *testing.T, closeWS <-chan []byte) (*httptest.Server, chan<- string, <-chan string, <-chan error, error) {
 	serverChan := make(chan string)
 	requestsChan := make(chan string)
 	errChan := make(chan error)
+	stopListen := make(chan bool)
 
 	upgrader := websocket.Upgrader{ReadBufferSize: 1024, WriteBufferSize: 1024}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := upgrader.Upgrade(w, r, nil)
 		go func() {
-			<-closeWS
-			ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+			ws.WriteControl(websocket.CloseMessage, <-closeWS, time.Now().Add(time.Second))
+			close(stopListen)
 		}()
 		if err != nil {
 			errChan <- err
 		}
 		go func() {
-			_, msg, err := ws.ReadMessage()
-			if err != nil {
-				errChan <- err
-			} else {
-				requestsChan <- string(msg)
+			for {
+				select {
+				case <-stopListen:
+					return
+				default:
+					_, msg, err := ws.ReadMessage()
+					if err != nil {
+						errChan <- err
+					} else {
+						requestsChan <- string(msg)
+					}
+				}
 			}
 		}()
 		for str := range serverChan {
@@ -54,6 +63,6 @@ func StartMockServer(t *testing.T, closeWS <-chan bool) (*httptest.Server, chan<
 		}
 	})
 
-	server := httptest.NewTLSServer(handler)
+	server := httptest.NewUnstartedServer(handler)
 	return server, serverChan, requestsChan, errChan, nil
 }
