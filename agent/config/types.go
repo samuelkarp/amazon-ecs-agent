@@ -163,6 +163,13 @@ type Config struct {
 	// Setting this value to be different from the default will disable loading
 	// the image from the tarball; the referenced image must already be loaded.
 	PauseContainerTag string
+
+	// OverrideAWSVPCLocalIPv4Address overrides the local IPv4 address chosen
+	// for a task using the `awsvpc` networking mode. Using this configuration
+	// will limit you to running one `awsvpc` task at a time. IPv4 addresses
+	// must be specified in decimal-octet form and also specify the subnet
+	// size (e.g., "169.254.172.42/22").
+	OverrideAWSVPCLocalIPv4Address string
 }
 
 // SensitiveRawMessage is a struct to store some data that should not be logged
