@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 * Feature - Support for provisioning Tasks with ENIs
+* Enhancement - Retry failed container image pull operations.
 
 ## 1.14.4
 * Enhancement - Batch container state change events. [#867](https://github.com/aws/amazon-ecs-agent/pull/867)
