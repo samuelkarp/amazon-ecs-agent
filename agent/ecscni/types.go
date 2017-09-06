@@ -59,7 +59,7 @@ type IPAMConfig struct {
 	// IPV4Subnet is the ip address range managed by ipam
 	IPV4Subnet string `json:"ipv4-subnet,omitempty"`
 	// IPV4Address is the ip address to deal with(assign or release) in ipam
-	IPV4Address string `json:"ipv4-address,omitempty"`
+	IPV4Address *types.IPNet `json:"ipv4-address,omitempty"`
 	// IPV4Gateway is the gateway returned by ipam, defalut the '.1' in the subnet
 	IPV4Gateway string `json:"ipv4-gateway,omitempty"`
 	// IPV4Routes is the route to added in the containerr namespace
@@ -131,7 +131,7 @@ type Config struct {
 	// BridgeName is the name used to create the bridge
 	BridgeName string
 	// IPAMV4Address is the ipv4 used to assign from ipam
-	IPAMV4Address string
+	IPAMV4Address *types.IPNet
 	// ID is the information associate with ip in ipam
 	ID string
 }

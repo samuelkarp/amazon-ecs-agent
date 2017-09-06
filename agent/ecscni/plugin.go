@@ -32,8 +32,8 @@ import (
 type CNIClient interface {
 	Version(string) (string, error)
 	Capabilities(string) ([]string, error)
-	SetupNS(*Config, []string) error
-	CleanupNS(*Config, []string) error
+	SetupNS(*Config, []types.IPNet) error
+	CleanupNS(*Config, []types.IPNet) error
 }
 
 // cniClient is the client to call plugin and setup the network
@@ -60,7 +60,7 @@ func NewClient(cfg *Config) CNIClient {
 
 // SetupNS will set up the namespace of container, including create the bridge
 // and the veth pair, move the eni to container namespace, setup the routes
-func (client *cniClient) SetupNS(cfg *Config, additionalLocalRoutes []string) error {
+func (client *cniClient) SetupNS(cfg *Config, additionalLocalRoutes []types.IPNet) error {
 	cns := &libcni.RuntimeConf{
 		ContainerID: cfg.ContainerID,
 		NetNS:       fmt.Sprintf(netnsFormat, cfg.ContainerPID),
@@ -86,7 +86,7 @@ func (client *cniClient) SetupNS(cfg *Config, additionalLocalRoutes []string) er
 
 // CleanupNS will clean up the container namespace, including remove the veth
 // pair, release the ip address in ipam
-func (client *cniClient) CleanupNS(cfg *Config, additionalLocalRoutes []string) error {
+func (client *cniClient) CleanupNS(cfg *Config, additionalLocalRoutes []types.IPNet) error {
 	cns := &libcni.RuntimeConf{
 		ContainerID: cfg.ContainerID,
 		NetNS:       fmt.Sprintf(netnsFormat, cfg.ContainerPID),
@@ -105,27 +105,19 @@ func (client *cniClient) CleanupNS(cfg *Config, additionalLocalRoutes []string) 
 }
 
 // constructNetworkConfig creates configuration for eni, ipam and bridge plugin
-func (client *cniClient) constructNetworkConfig(cfg *Config, additionalLocalRoutes []string) (*libcni.NetworkConfigList, error) {
+func (client *cniClient) constructNetworkConfig(cfg *Config, additionalLocalRoutes []types.IPNet) (*libcni.NetworkConfigList, error) {
 	_, dst, err := net.ParseCIDR(TaskIAMRoleEndpoint)
 
-	var routes []*types.Route
-
-	routes = append(routes,
-		&types.Route{
+	routes := []*types.Route{
+		{
 			Dst: *dst,
 		},
-	)
+	}
 
-	for _, destination := range additionalLocalRoutes {
-		_, route, err := net.ParseCIDR(destination)
-		if err != nil {
-			// If we're passed an unparsable network, we'll log an error but
-			// continue processing.
-			seelog.Errorf("Unable to parse destination %s: %s", destination, err)
-			continue
-		}
+	for _, route := range additionalLocalRoutes {
 		seelog.Debugf("Adding an additional route for %s", route)
-		routes = append(routes, &types.Route{ Dst: *route })
+		ipNetRoute := (net.IPNet)(route)
+		routes = append(routes, &types.Route{Dst: ipNetRoute})
 	}
 
 	ipamConf := IPAMConfig{
@@ -134,7 +126,7 @@ func (client *cniClient) constructNetworkConfig(cfg *Config, additionalLocalRout
 		IPV4Subnet:  client.subnet,
 		IPV4Address: cfg.IPAMV4Address,
 		ID:          cfg.ID,
-		IPV4Routes: routes,
+		IPV4Routes:  routes,
 	}
 
 	bridgeName := defaultBridgeName
@@ -176,6 +168,7 @@ func (client *cniClient) constructNetworkConfig(cfg *Config, additionalLocalRout
 		seelog.Errorf("Marshal eni configuration error: %v", err)
 		return nil, err
 	}
+	seelog.Infof("eniConfBytes: %s", string(eniConfBytes))
 	plugins = append(plugins, &libcni.NetworkConfig{
 		Network: &types.NetConf{
 			Type: ECSENIPluginName,

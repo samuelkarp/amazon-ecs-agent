@@ -7,6 +7,7 @@ import (
 
 	"github.com/aws/amazon-ecs-agent/agent/ecscni/mocks_cnitypes"
 	"github.com/aws/amazon-ecs-agent/agent/ecscni/mocks_libcni"
+	"github.com/containernetworking/cni/pkg/types"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 )
@@ -26,8 +27,11 @@ func TestSetupNS(t *testing.T) {
 		mockResult.EXPECT().String().Return(""),
 	)
 
-	additionalRoutes := []string{"169.254.172.1/32", "10.11.12.13/32"}
-	err := ecscniClient.SetupNS(&Config{}, additionalRoutes)
+	additionalRoutesJson := `["169.254.172.1/32", "10.11.12.13/32"]`
+	additionalRoutes := &[]types.IPNet{}
+	err := json.Unmarshal([]byte(additionalRoutesJson), additionalRoutes)
+	assert.NoError(t, err)
+	err = ecscniClient.SetupNS(&Config{}, *additionalRoutes)
 	assert.NoError(t, err)
 }
 
@@ -41,8 +45,11 @@ func TestCleanupNS(t *testing.T) {
 
 	libcniClient.EXPECT().DelNetworkList(gomock.Any(), gomock.Any()).Return(nil)
 
-	additionalRoutes := []string{"169.254.172.1/32", "10.11.12.13/32"}
-	err := ecscniClient.CleanupNS(&Config{}, additionalRoutes)
+	additionalRoutesJson := `["169.254.172.1/32", "10.11.12.13/32"]`
+	additionalRoutes := &[]types.IPNet{}
+	err := json.Unmarshal([]byte(additionalRoutesJson), additionalRoutes)
+	assert.NoError(t, err)
+	err = ecscniClient.CleanupNS(&Config{}, *additionalRoutes)
 	assert.NoError(t, err)
 }
 
@@ -61,20 +68,24 @@ func TestConstructNetworkConfig(t *testing.T) {
 		BridgeName:     "bridge-test1",
 	}
 
-	additionalRoutes := []string{"169.254.172.1/32", "10.11.12.13/32"}
-	networkConfigList, err := ecscniClient.(*cniClient).constructNetworkConfig(config, additionalRoutes)
+	additionalRoutesJson := `["169.254.172.1/32", "10.11.12.13/32"]`
+	additionalRoutes := &[]types.IPNet{}
+	err := json.Unmarshal([]byte(additionalRoutesJson), additionalRoutes)
+	assert.NoError(t, err)
+	networkConfigList, err := ecscniClient.(*cniClient).constructNetworkConfig(config, *additionalRoutes)
 	assert.NoError(t, err, "construct cni plugins configuration failed")
 
 	bridgeConfig := &BridgeConfig{}
 	eniConfig := &ENIConfig{}
 	for _, plugin := range networkConfigList.Plugins {
 		var err error
-		if plugin.Network.Type == ECSBridgePluginName {
+		switch plugin.Network.Type {
+		case ECSBridgePluginName:
 			err = json.Unmarshal(plugin.Bytes, bridgeConfig)
-		} else if plugin.Network.Type == ECSENIPluginName {
+		case ECSENIPluginName:
 			err = json.Unmarshal(plugin.Bytes, eniConfig)
 		}
-		assert.NoError(t, err, "unmarshal config from bytes failed")
+		assert.NoError(t, err, "unmarshal config from bytes failed for plugin %s\n%s", plugin.Network.Type, string(plugin.Bytes))
 	}
 
 	assert.Equal(t, config.BridgeName, bridgeConfig.BridgeName)

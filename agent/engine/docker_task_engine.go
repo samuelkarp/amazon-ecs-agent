@@ -562,7 +562,7 @@ func (engine *DockerTaskEngine) pullAndUpdateContainerReference(task *api.Task, 
 			return nil
 		}
 		if imagePullError, ok := metadata.Error.(CannotPullContainerError); ok {
-			seelog.Warnf("When pulling %s: %s", container.Image, pullError)
+			seelog.Warnf("When pulling %s: %s", container.Image, imagePullError)
 			return imagePullError
 		} else {
 			// If the pull fails with something other than CannotPullContainerError, or if it is successful, we stop
@@ -712,7 +712,9 @@ func (engine *DockerTaskEngine) buildCNIConfigFromTaskContainer(task *api.Task, 
 		return nil, errors.Wrapf(err, "engine: build cni configuration from taskfailed")
 	}
 
-	if engine.cfg.OverrideAWSVPCLocalIPv4Address != "" {
+	if engine.cfg.OverrideAWSVPCLocalIPv4Address != nil &&
+		len(engine.cfg.OverrideAWSVPCLocalIPv4Address.IP) != 0 &&
+		len(engine.cfg.OverrideAWSVPCLocalIPv4Address.Mask) != 0 {
 		cfg.IPAMV4Address = engine.cfg.OverrideAWSVPCLocalIPv4Address
 	}
 
