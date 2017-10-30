@@ -59,11 +59,11 @@ done first:
   `iptables -t nat -A OUTPUT -d 169.254.170.2 -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 51679`
   and `export TEST_TASK_IAM_ROLE_NET_HOST=true`
 
-### Custom Agent
+### Windows
 
-If you want to change the tests to point to a custom agent exe:
-Before running these tests, record the directory where the binary is present
-in the `ECS_WINDOWS_TEST_DIR` environment variable.
+Before running these tests, you should build the ECS agent (as `amazon-ecs-agent.exe`) and
+record the directory where the binary is present in the `ECS_WINDOWS_TEST_DIR`
+environment variable.
 
 #### Environment variables
 You can configure the following environment variables to change test
