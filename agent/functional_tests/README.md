@@ -59,18 +59,18 @@ done first:
   `iptables -t nat -A OUTPUT -d 169.254.170.2 -p tcp -m tcp --dport 80 -j REDIRECT --to-ports 51679`
   and `export TEST_TASK_IAM_ROLE_NET_HOST=true`
 
-### Windows
+### Custom Agent
 
-Before running these tests, you should build the ECS agent (as `agent.exe`) and
-record the directory where the binary is present in the `ECS_WINDOWS_TEST_DIR`
-environment variable.
+If you want to change the tests to point to a custom agent exe:
+Before running these tests, record the directory where the binary is present
+in the `ECS_WINDOWS_TEST_DIR` environment variable.
 
 #### Environment variables
 You can configure the following environment variables to change test
 execution behavior:
 * `AWS_REGION`: Control the region that is used for test execution
 * `ECS_CLUSTER`: Control the cluster used for test execution
-* `ECS_WINDOWS_TEST_DIR`: Override the path used to find `agent.exe`
+* `ECS_WINDOWS_TEST_DIR`: Override the path used to find `amazon-ecs-agent.exe`
 * `ECS_FTEST_TMP`: Override the default temporary directory used for storing
   test logs and data files
 
