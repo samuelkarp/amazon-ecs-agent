@@ -490,6 +490,10 @@ func (dg *dockerGoClient) createContainer(ctx context.Context, config *docker.Co
 		Name:       name,
 		Context:    ctx,
 	}
+
+	dump, _ := json.MarshalIndent(containerOptions, "", "  ")
+	seelog.Criticalf("Create container parameters\n%s", dump)
+
 	dockerContainer, err := client.CreateContainer(containerOptions)
 	if err != nil {
 		return DockerContainerMetadata{Error: CannotCreateContainerError{err}}
@@ -530,6 +534,7 @@ func (dg *dockerGoClient) startContainer(ctx context.Context, id string) DockerC
 		return DockerContainerMetadata{Error: CannotGetDockerClientError{version: dg.version, err: err}}
 	}
 
+	seelog.Criticalf("Starting container ID %s with nil hostConfig", id)
 	err = client.StartContainerWithContext(id, nil, ctx)
 	metadata := dg.containerMetadata(id)
 	if err != nil {
